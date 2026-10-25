@@ -6,12 +6,12 @@ const source = fs.readFileSync(require('node:path').join(__dirname, '../qbittorr
 const magnet = 'magnet:?xt=urn:btih:' + 'a'.repeat(40);
 
 function setup(storage = {}, replies = ['Ok.']) {
-    const requests = [], notices = [], controllers = [], params = [], timers = new Map();
+    const requests = [], notices = [], controllers = [], params = [], dialogs = [], timers = new Map();
     let listener, timerId = 0;
     const Lampa = {
         Storage: { get: (key, fallback) => ({ qbit_url: 'http://qbit.test:8080', qbit_bypass: true, qbit_confirm: false, ...storage })[key] ?? fallback },
         Activity: { active: () => 'torrents', push() {} },
-        Select: { show() {} },
+        Select: { show(dialog) { dialogs.push(dialog); }, hide() {} },
         Noty: { show: message => notices.push(message) },
         SettingsApi: { addComponent() {}, addParam(param) { params.push(param); } },
         Listener: { follow: (name, callback) => { assert.equal(name, 'torrent'); listener = callback; } },
@@ -31,14 +31,15 @@ function setup(storage = {}, replies = ['Ok.']) {
         btoa: value => Buffer.from(value, 'binary').toString('base64'), unescape,
         console, setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
         clearTimeout: id => timers.delete(id) });
-    vm.runInContext(source, context);
+    vm.runInContext(source.replace('    function initialize() {',
+        '    window.actions = {deleteTorrent, prepareFiles, sendTorrent}; function initialize() {'), context);
     function menu(data) {
         const event = { type: 'onlong', element: data, menu: [{ title: 'Existing' }] };
         listener(event);
         return event;
     }
-    return { requests, notices, controllers, params, timers, context, listener, menu,
-        send: data => menu(data).menu[1].onSelect(),
+    return { requests, notices, controllers, params, dialogs, timers, context, listener, menu,
+        send: data => { menu(data).menu[1].onSelect(); dialogs.at(-1).onSelect({all:true}); },
         tick: () => { const [id, callback] = timers.entries().next().value; timers.delete(id); callback(); } };
 }
 
@@ -301,8 +302,8 @@ test('unfinished downloads precede completed ones without mutating the API respo
 
 test('confirmation does not open a dialog over a different activity', () => {
     const app = setup({qbit_confirm:true}, [[], {pending_count:1}, []]);
-    app.context.Lampa.Select.show=()=>assert.fail('dialog opened over another activity');
     app.send({Link:'http://indexer.test/download',Title:'Expected'});
+    app.context.Lampa.Select.show=()=>assert.fail('dialog opened over another activity');
     app.context.Lampa.Activity.active=()=> 'other-screen';
     app.tick();
     app.requests.at(-1).success([{hash:'c'.repeat(40),name:'Expected',state:'downloading',progress:0}]);
@@ -322,4 +323,95 @@ test('sidebar registration waits for app ready while torrent action registers im
     assert.equal(typeof listeners.torrent,'function');
     listeners.app({type:'ready'});
     assert.equal(app.context.window.registered,true);
+});
+
+
+const fileMetadata = { hash:'c'.repeat(40), info:{files:[{path:'Season/S01E01.mkv',length:200},{path:'Season/S01E02.mkv',length:300}]}};
+
+test('opening download chooser does not start a download', () => {
+    const app=setup();
+    app.menu({MagnetUri:magnet}).menu[1].onSelect();
+    assert.equal(app.requests.length,0);
+    assert.equal(app.dialogs.at(-1).items[0].files,true);
+    app.dialogs.at(-1).onBack();
+    assert.equal(app.requests.length,0);
+});
+
+test('metadata waits without adding, then submits only explicitly selected file priorities', () => {
+    const app=setup({}, [{},fileMetadata,[],{success_count:1}]);
+    app.context.window.actions.prepareFiles({Link:'http://indexer.test/file?key=a%2Fb&x=1',Title:'Season'});
+    assert.match(app.requests[0].url,/fetchMetadata$/);
+    assert.equal(decodeURIComponent(decodeURIComponent(app.requests[0].body.slice(7))),'http://indexer.test/file?key=a%2Fb&x=1');
+    assert.equal(app.requests.some(r=>r.url.endsWith('/add')),false);
+    app.tick();
+    const picker=app.dialogs.at(-1);
+    assert.equal(picker.items.filter(i=>i.checked).length,0);
+    picker.items.find(i=>i.index===1).checked=true;
+    picker.onSelect({download:true});
+    const add=app.requests.find(r=>r.url.endsWith('/add'));
+    assert.match(add.body,/name="filePriorities"\r\n\r\n0,1/);
+});
+
+test('cancelled or unavailable metadata never submits a torrent or reopens a picker', () => {
+    const app=setup({}, []);
+    app.context.window.actions.prepareFiles({MagnetUri:magnet});
+    app.dialogs.at(-1).onBack();
+    const count=app.dialogs.length;
+    app.requests[0].success(fileMetadata);
+    assert.equal(app.dialogs.length,count);
+    assert.equal(app.requests.length,1);
+    const older=setup({}, [{error:{status:404}}]);
+    older.context.window.actions.prepareFiles({MagnetUri:magnet});
+    assert.match(older.notices.at(-1),/5.3/);
+    assert.equal(older.requests.length,1);
+});
+
+test('no selected files and expired metadata cannot start the whole season', () => {
+    const app=setup({}, [fileMetadata]);
+    app.context.window.actions.prepareFiles({MagnetUri:magnet});
+    app.dialogs.at(-1).onSelect({download:true});
+    assert.equal(app.requests.length,1);
+    assert.match(app.notices.at(-1),/хотя бы один/);
+    const expired=setup({}, [fileMetadata,[],{error:{status:400}}]);
+    expired.context.window.actions.prepareFiles({MagnetUri:magnet});
+    const picker=expired.dialogs.at(-1);picker.items.find(i=>i.index===0).checked=true;picker.onSelect({download:true});
+    assert.equal(expired.requests.filter(r=>r.url.endsWith('/add')).length,1);
+    assert.match(expired.notices.at(-1),/HTTP 400/);
+});
+
+test('existing torrent is not modified when selecting files', () => {
+    const app=setup({}, [fileMetadata,[{hash:fileMetadata.hash,name:'Already present',progress:0.2,state:'downloading'}]]);
+    app.context.window.actions.prepareFiles({MagnetUri:magnet});
+    const picker=app.dialogs.at(-1);picker.items.find(i=>i.index===0).checked=true;picker.onSelect({download:true});
+    assert.equal(app.requests.some(r=>r.url.endsWith('/add')||r.url.endsWith('/filePrio')),false);
+    assert.match(app.notices.at(-1),/Уже добавлено/);
+});
+
+test('delete defaults to cancel and binds explicit file mode to one exact hash', () => {
+    for(const files of [false,true]) {
+        const app=setup({}, ['',[]]);let updated=0;
+        app.context.window.actions.deleteTorrent({url:'http://qbit.test',bypass:true},{hash:'a'.repeat(40),name:'<img src=x>'},files,()=>updated++);
+        const dialog=app.dialogs.at(-1);
+        assert.equal(dialog.items[0].selected,true);
+        assert.match(dialog.items[1].subtitle,/&lt;img/);
+        dialog.onSelect(dialog.items[0]);
+        assert.equal(app.requests.length,0);
+        dialog.onSelect(dialog.items[1]);
+        assert.equal(app.requests[0].body,'hashes='+'a'.repeat(40)+'&deleteFiles='+files);
+        assert.equal(updated,1);
+    }
+});
+
+test('invalid hashes and failed destructive calls never broaden scope or retry', () => {
+    for(const hash of ['all','a|b','',undefined]) {
+        const app=setup();
+        app.context.window.actions.deleteTorrent({}, {hash,name:'Test'},true,()=>{});
+        assert.equal(app.requests.length,0);
+        assert.equal(app.dialogs.length,0);
+    }
+    const app=setup({}, [{error:{status:0}}]);
+    app.context.window.actions.deleteTorrent({url:'http://qbit.test',bypass:true},{hash:'a'.repeat(40),name:'Test'},true,()=>{});
+    const dialog=app.dialogs.at(-1);dialog.onSelect(dialog.items[1]);
+    assert.equal(app.requests.length,1);
+    assert.doesNotMatch(app.notices.at(-1),/Торрент удалён/);
 });

@@ -344,6 +344,12 @@
             Lampa.Controller.collectionSet(scroll.render());
             Lampa.Controller.collectionFocus(last, scroll.render());
         }
+        function moveRow(step) {
+            var items = body.find('.selector').toArray();
+            var index = items.indexOf(last) + step;
+            if (index < 0) return Lampa.Controller.toggle('head');
+            if (index < items.length) Lampa.Controller.collectionFocus(items[index], scroll.render());
+        }
         function load() {
             if (!active || destroyed || loading) return;
             clearTimeout(timer);
@@ -404,11 +410,8 @@
                 toggle: focus,
                 left: function () { Lampa.Controller.toggle('menu'); },
                 right: function () {},
-                up: function () {
-                    if (Lampa.Navigator.canmove('up')) Lampa.Navigator.move('up');
-                    else Lampa.Controller.toggle('head');
-                },
-                down: function () { Lampa.Navigator.move('down'); },
+                up: function () { moveRow(-1); },
+                down: function () { moveRow(1); },
                 back: function () { Lampa.Activity.backward(); }
             });
             Lampa.Controller.toggle('content');

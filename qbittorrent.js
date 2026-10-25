@@ -107,7 +107,8 @@
             return '--' + boundary + '\r\nContent-Disposition: form-data; name="' + key
                 + '"\r\n\r\n' + fields[key] + '\r\n';
         }).join('') + '--' + boundary + '--\r\n';
-        return { body: body, contentType: 'multipart/form-data; boundary=' + boundary };
+        // OkHttp appends charset otherwise; qBittorrent requires boundary to be last.
+        return { body: body, contentType: 'multipart/form-data; charset=utf-8; boundary=' + boundary };
     }
 
     function confirm(settings, link) {

@@ -40,7 +40,7 @@ function setup(storage = {}, replies = ['Ok.']) {
         return event;
     }
     return { requests, notices, controllers, params, dialogs, timers, timerDelays, context, listener, menu,
-        send: data => { menu(data).menu[1].onSelect(); dialogs.at(-1).onSelect({all:true}); },
+        send: data => { menu(data).menu[0].onSelect(); dialogs.at(-1).onSelect({all:true}); },
         tick: () => { const [id, callback] = [...timers.entries()].sort((a,b)=>timerDelays.get(a[0])-timerDelays.get(b[0]))[0]; timers.delete(id); callback(); } };
 }
 
@@ -49,8 +49,9 @@ test('adds one long-OK action, preserves existing menu and restores controller',
     const event = app.menu({ MagnetUri: magnet });
     app.listener(event);
     assert.equal(event.menu.length, 2);
-    assert.equal(event.menu[1].title, 'В qBittorrent');
-    event.menu[1].onSelect();
+    assert.equal(event.menu[0].title, 'В qBittorrent');
+    assert.equal(event.menu[1].title, 'Existing');
+    event.menu[0].onSelect();
     assert.deepEqual(app.controllers, ['content']);
     const render = { type: 'render', element: {}, menu: [] };
     app.listener(render);
@@ -331,7 +332,7 @@ const fileMetadata = { hash:'c'.repeat(40), info:{files:[{path:'Season/S01E01.mk
 
 test('opening download chooser does not start a download', () => {
     const app=setup();
-    app.menu({MagnetUri:magnet}).menu[1].onSelect();
+    app.menu({MagnetUri:magnet}).menu[0].onSelect();
     assert.equal(app.requests.length,0);
     assert.equal(app.dialogs.at(-1).items[0].files,true);
     app.dialogs.at(-1).onBack();

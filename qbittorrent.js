@@ -656,7 +656,7 @@
             if (!event || event.type !== 'onlong' || !event.element || !Array.isArray(event.menu)) return;
             if (event.menu.some(function (item) { return item.tvPluginsQbit; })) return;
             var controller = Lampa.Controller.enabled().name;
-            event.menu.push({
+            event.menu.unshift({
                 title: 'В qBittorrent',
                 tvPluginsQbit: true,
                 onSelect: function () {

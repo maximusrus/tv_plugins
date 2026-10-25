@@ -27,7 +27,7 @@ function setup(storage = {}, replies = ['Ok.']) {
             };
         }
     };
-    const context = vm.createContext({ Lampa, window: { Lampa }, document: { addEventListener() {} },
+    const context = vm.createContext({ Lampa, window: { Lampa, appready: true }, document: { addEventListener() {} },
         btoa: value => Buffer.from(value, 'binary').toString('base64'), unescape,
         console, setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
         clearTimeout: id => timers.delete(id) });
@@ -307,4 +307,19 @@ test('confirmation does not open a dialog over a different activity', () => {
     app.tick();
     app.requests.at(-1).success([{hash:'c'.repeat(40),name:'Expected',state:'downloading',progress:0}]);
     assert.match(app.notices.at(-1), /Добавлено/);
+});
+
+
+test('sidebar registration waits for app ready while torrent action registers immediately', () => {
+    const app = setup();
+    const listeners = {};
+    app.context.window.tvPluginsQbit=false;
+    app.context.window.appready=false;
+    app.context.Lampa.Listener.follow=(name,callback)=>listeners[name]=callback;
+    vm.runInContext(source.replace('    function registerDownloads() {',
+        '    function registerDownloads() { window.registered = true; return;'),app.context);
+    assert.equal(app.context.window.registered,undefined);
+    assert.equal(typeof listeners.torrent,'function');
+    listeners.app({type:'ready'});
+    assert.equal(app.context.window.registered,true);
 });

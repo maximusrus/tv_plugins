@@ -446,7 +446,10 @@
         if (window.tvPluginsQbit) return;
         window.tvPluginsQbit = true;
         registerSettings();
-        registerDownloads();
+        if (window.appready) registerDownloads();
+        else Lampa.Listener.follow('app', function (event) {
+            if (event.type === 'ready') registerDownloads();
+        });
         Lampa.Listener.follow('torrent', function (event) {
             if (!event || event.type !== 'onlong' || !event.element || !Array.isArray(event.menu)) return;
             if (event.menu.some(function (item) { return item.tvPluginsQbit; })) return;

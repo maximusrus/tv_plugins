@@ -292,8 +292,8 @@
             title: 'qBittorrent',
             items: [
                 { title: 'Назад', subtitle: safeText(torrent.name), selected: true },
-                { title: 'Удалить торрент', remove: true, files: false },
-                { title: 'Удалить торрент и файлы', remove: true, files: true }
+                { title: 'Удалить торрент и файлы', remove: true, files: true },
+                { title: 'Удалить торрент', remove: true, files: false }
             ],
             onSelect: function (item) {
                 if (item.remove) deleteTorrent(settings, torrent, item.files, updated);

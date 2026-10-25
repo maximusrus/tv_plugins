@@ -484,3 +484,42 @@ test('Watch shortcut toggles immediately and falls back to the original source m
     storage.qbit_watch_torrents=false;setting.onChange();play.trigger();assert.equal(menus,3);
     assert.equal(app.requests.length,0);
 });
+
+
+test('routes movie and series cards to exact library paths without appending category', () => {
+    for (const [movie,expected] of [
+        [{media_type:'movie'},'/library/movies'], [{release_date:'2026-01-01'},'/library/movies'],
+        [{media_type:'tv'},'/library/series'], [{first_air_date:'2026-01-01'},'/library/series'],
+        [{number_of_seasons:2},'/library/series'], [{original_name:'A series'},'/library/series']
+    ]) {
+        const app=setup({qbit_movie_path:' /library/movies ',qbit_series_path:'/library/series',qbit_category:'video',qbit_savepath:'/fallback'});
+        app.context.Lampa.Activity.active=()=>({movie});
+        app.send({MagnetUri:magnet});
+        const body=app.requests[0].body;
+        assert.ok(body.includes('name="savepath"\r\n\r\n'+expected+'\r\n'));
+        assert.match(body,/name="category"\r\n\r\nvideo/);
+        assert.match(body,/name="autoTMM"\r\n\r\nfalse/);
+    }
+});
+
+test('empty library path or unknown card keeps existing category/path behavior', () => {
+    for (const movie of [{}, {media_type:'movie'}]) {
+        const app=setup({qbit_movie_path:' ',qbit_series_path:'/series',qbit_savepath:'/base',qbit_category:'video'});
+        app.context.Lampa.Activity.active=()=>({movie});
+        app.send({MagnetUri:magnet,Title:'S01E01 does not determine media type'});
+        assert.match(app.requests[0].body,/name="savepath"\r\n\r\n\/base\/video/);
+    }
+});
+
+test('selected episodes retain the card type captured when the torrent menu opened', () => {
+    const app=setup({qbit_series_path:'/library/series',qbit_movie_path:'/library/movies'},[fileMetadata,[],{success_count:1}]);
+    app.context.Lampa.Activity.active=()=>({movie:{media_type:'tv'}});
+    const event=app.menu({MagnetUri:magnet});
+    const activity={movie:{media_type:'movie'}};
+    app.context.Lampa.Activity.active=()=>activity;
+    event.menu[0].onSelect();app.dialogs.at(-1).onSelect({files:true});
+    const picker=app.dialogs.at(-1);picker.items.find(x=>x.index===1).checked=true;picker.onSelect({download:true});
+    const add=app.requests.find(r=>r.url.endsWith('/add'));
+    assert.match(add.body,/name="savepath"\r\n\r\n\/library\/series/);
+    assert.match(add.body,/name="filePriorities"\r\n\r\n0,1/);
+});

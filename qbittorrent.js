@@ -5,7 +5,7 @@
     'use strict';
 
     var DEFAULTS = {
-        url: '', user: '', pass: '', bypass: false, savepath: '', category: '',
+        url: '', user: '', pass: '', bypass: false, savepath: '', movie_path: '', series_path: '', category: '',
         rename: true, confirm: true, auto_cat_path: true
     };
     var busy = false;
@@ -25,6 +25,17 @@
         });
         result.url = result.url.trim().replace(/\/+$/, '');
         return result;
+    }
+
+    function cardMediaType() {
+        var activity = Lampa.Activity.active();
+        var movie = activity && activity.movie;
+        if (!movie) return '';
+        if (movie.media_type === 'tv') return 'series';
+        if (movie.media_type === 'movie') return 'movie';
+        if (movie.first_air_date || movie.number_of_seasons || movie.original_name || movie.name) return 'series';
+        if (movie.release_date) return 'movie';
+        return '';
     }
 
     function torrentLink(data) {
@@ -236,6 +247,12 @@
         if (!link) return notify('У раздачи нет magnet или HTTP(S)-ссылки на торрент.');
         var settings = config();
         if (!validSettings(settings)) return;
+        var separatePath = data.qbitMediaType === 'series' ? settings.series_path
+            : data.qbitMediaType === 'movie' ? settings.movie_path : '';
+        if (separatePath.trim()) {
+            settings.savepath = separatePath.trim();
+            settings.auto_cat_path = false;
+        }
         var title = String(data.Title || data.title || '').trim();
         submissionActivity = Lampa.Activity.active();
         busy = true;
@@ -688,12 +705,13 @@
             if (!event || event.type !== 'onlong' || !event.element || !Array.isArray(event.menu)) return;
             if (event.menu.some(function (item) { return item.tvPluginsQbit; })) return;
             var controller = Lampa.Controller.enabled().name;
+            var data = Object.assign({}, event.element, { qbitMediaType: cardMediaType() });
             event.menu.unshift({
                 title: 'В qBittorrent',
                 tvPluginsQbit: true,
                 onSelect: function () {
                     Lampa.Controller.toggle(controller);
-                    chooseDownload(event.element);
+                    chooseDownload(data);
                 }
             });
         });
@@ -754,6 +772,18 @@
                 component: 'qbit_direct',
                 param: { name: 'qbit_savepath', type: 'input', values: '', default: DEFAULTS.savepath },
                 field: { name: 'Базовый путь сохранения', description: 'Базовый путь (например: /app/qBittorrent). Пусто = по умолчанию сервера' }
+            });
+
+            Lampa.SettingsApi.addParam({
+                component: 'qbit_direct',
+                param: { name: 'qbit_movie_path', type: 'input', values: '', default: DEFAULTS.movie_path },
+                field: { name: 'Папка для фильмов', description: 'Полный путь на сервере qBittorrent. Без добавления категории. Пусто = базовый путь.' }
+            });
+
+            Lampa.SettingsApi.addParam({
+                component: 'qbit_direct',
+                param: { name: 'qbit_series_path', type: 'input', values: '', default: DEFAULTS.series_path },
+                field: { name: 'Папка для сериалов', description: 'Полный путь на сервере qBittorrent, в том числе для отдельных серий. Пусто = базовый путь.' }
             });
 
             Lampa.SettingsApi.addParam({

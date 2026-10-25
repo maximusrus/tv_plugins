@@ -93,8 +93,9 @@
         }
     }
 
-    function addBody(settings, link, title) {
+    function addBody(settings, link, title, selection) {
         var fields = { urls: link, paused: 'false', stopped: 'false', autoTMM: 'false' };
+        if (selection) fields.filePriorities = selection.priorities.join(',');
         var savepath = settings.savepath;
         if (settings.category) {
             fields.category = settings.category;
@@ -200,8 +201,13 @@
         poll();
     }
 
-    function sendTorrent(data) {
+    function sendTorrent(data, selection) {
         if (busy) return notify('Дождитесь ответа qBittorrent.');
+        if (selection && (!validHash(selection.hash) || !Array.isArray(selection.priorities)
+            || !selection.priorities.length || selection.priorities.indexOf(1) === -1
+            || selection.priorities.some(function (priority) { return priority !== 0 && priority !== 1; }))) {
+            return notify('Некорректный выбор файлов. Загрузка не запущена.');
+        }
         var link = torrentLink(data);
         if (!link) return notify('У раздачи нет magnet или HTTP(S)-ссылки на торрент.');
         var settings = config();
@@ -211,9 +217,9 @@
         busy = true;
         notify('Отправляю в qBittorrent…');
         function add(before) {
-            var existing = before.filter(function (torrent) { return torrent.hash.toLowerCase() === magnetHash(link); })[0];
+            var existing = before.filter(function (torrent) { return torrent.hash.toLowerCase() === (selection ? selection.hash.toLowerCase() : magnetHash(link)); })[0];
             if (existing) return showConfirmed(existing, true);
-            var payload = addBody(settings, link, title);
+            var payload = addBody(settings, link, title, selection);
             request(settings, '/api/v2/torrents/add', payload.body, payload.contentType, function (error, response) {
                 if (error) return reportError(error);
                 var result = response;
@@ -232,12 +238,177 @@
             });
         }
         connect(settings, function () {
-            if (!settings.confirm) return add([]);
+            if (!settings.confirm && !selection) return add([]);
             readTorrents(settings, function (error, torrents) {
                 if (error) return reportError(error);
                 add(torrents);
             });
         });
+    }
+
+    function safeText(value) {
+        return String(value).replace(/[&<>"']/g, function (character) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character];
+        });
+    }
+
+    function validHash(hash) {
+        return typeof hash === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(hash);
+    }
+
+    function deleteTorrent(settings, torrent, deleteFiles, updated) {
+        if (busy) return notify('Дождитесь ответа qBittorrent.');
+        if (!validHash(torrent.hash)) return notify('Некорректный идентификатор торрента. Обновите список.');
+        Lampa.Select.show({
+            title: deleteFiles ? 'Удалить торрент и файлы с диска?' : 'Удалить торрент из списка?',
+            items: [
+                { title: 'Отмена', selected: true },
+                { title: deleteFiles ? 'Удалить торрент и файлы' : 'Удалить только торрент',
+                    subtitle: safeText(torrent.name) + (deleteFiles ? '<br>Файлы будут удалены с диска без возможности отмены.' : '<br>Файлы останутся на диске.'), remove: true }
+            ],
+            onSelect: function (item) {
+                Lampa.Controller.toggle('content');
+                if (!item.remove) return;
+                if (busy) return notify('Дождитесь ответа qBittorrent.');
+                busy = true;
+                request(settings, '/api/v2/torrents/delete', 'hashes=' + encodeURIComponent(torrent.hash)
+                    + '&deleteFiles=' + (deleteFiles ? 'true' : 'false'), 'application/x-www-form-urlencoded', function (error) {
+                    if (error) return reportError(error);
+                    readTorrents(settings, function (error, torrents) {
+                        busy = false;
+                        if (error || torrents.some(function (entry) { return entry.hash === torrent.hash; })) {
+                            notify('Удаление пока не подтверждено. Обновите список перед повтором.');
+                        } else notify(deleteFiles ? 'Торрент удалён; серверу передано удаление файлов.' : 'Торрент удалён. Файлы сохранены.');
+                        updated();
+                    });
+                });
+            },
+            onBack: function () { Lampa.Controller.toggle('content'); }
+        });
+    }
+
+    function torrentActions(settings, torrent, updated) {
+        Lampa.Select.show({
+            title: 'qBittorrent',
+            items: [
+                { title: 'Назад', subtitle: safeText(torrent.name), selected: true },
+                { title: 'Удалить торрент', remove: true, files: false },
+                { title: 'Удалить торрент и файлы', remove: true, files: true }
+            ],
+            onSelect: function (item) {
+                if (item.remove) deleteTorrent(settings, torrent, item.files, updated);
+                else Lampa.Controller.toggle('content');
+            },
+            onBack: function () { Lampa.Controller.toggle('content'); }
+        });
+    }
+
+    function chooseDownload(data) {
+        if (busy) return notify('Дождитесь ответа qBittorrent.');
+        Lampa.Select.show({
+            title: 'Что скачать?',
+            items: [
+                { title: 'Выбрать серии / файлы', files: true, selected: true },
+                { title: 'Скачать целиком', all: true },
+                { title: 'Отмена' }
+            ],
+            onSelect: function (item) {
+                Lampa.Controller.toggle('content');
+                if (item.files) prepareFiles(data);
+                else if (item.all) sendTorrent(data);
+            },
+            onBack: function () { Lampa.Controller.toggle('content'); }
+        });
+    }
+
+    function prepareFiles(data) {
+        if (busy) return notify('Дождитесь ответа qBittorrent.');
+        var settings = config();
+        var link = torrentLink(data);
+        if (!link) return notify('У раздачи нет magnet или HTTP(S)-ссылки на торрент.');
+        if (!validSettings(settings)) return;
+        var cancelled = false, timer, attempts = 0;
+        var activity = Lampa.Activity.active();
+        busy = true;
+        function cancel() {
+            cancelled = true;
+            clearTimeout(timer);
+            busy = false;
+            Lampa.Controller.toggle('content');
+        }
+        function current() {
+            if (cancelled) return false;
+            if (Lampa.Activity.active() !== activity) {
+                cancelled = true;
+                clearTimeout(timer);
+                busy = false;
+                return false;
+            }
+            return true;
+        }
+        function fail(message) {
+            if (!current()) return;
+            Lampa.Select.hide();
+            cancel();
+            notify(message);
+        }
+        Lampa.Select.show({
+            title: 'Получаем список файлов…',
+            items: [{ title: 'Отмена', subtitle: 'Загрузка серий ещё не запущена. Для magnet нужны доступные пиры.' }],
+            onSelect: cancel,
+            onBack: cancel
+        });
+        function poll() {
+            if (!current()) return;
+            // fetchMetadata decodes source once more after form decoding.
+            request(settings, '/api/v2/torrents/fetchMetadata', 'source=' + encodeURIComponent(encodeURIComponent(link)),
+                'application/x-www-form-urlencoded', function (error, response) {
+                if (!current()) return;
+                if (error) return fail(Number(error.status) === 404
+                    ? 'Выбор файлов требует qBittorrent 5.3 или новее. Загрузка не запущена.'
+                    : 'Не удалось получить список файлов. Загрузка не запущена.');
+                var metadata;
+                try { metadata = typeof response === 'string' ? JSON.parse(response) : response; }
+                catch (error) { return fail('Некорректный список файлов. Загрузка не запущена.'); }
+                if (!metadata || typeof metadata !== 'object') return fail('Некорректный ответ qBittorrent.');
+                if (metadata.info) {
+                    var files = metadata.info.files;
+                    if (!validHash(metadata.hash) || !Array.isArray(files) || !files.length || files.some(function (file) {
+                        return !file || typeof file.path !== 'string' || !isFinite(file.length) || file.length < 0;
+                    })) return fail('Некорректный список файлов. Загрузка не запущена.');
+                    busy = false;
+                    Lampa.Select.hide();
+                    return selectFiles(data, metadata);
+                }
+                if (++attempts >= 30) return fail('Список файлов пока недоступен. Загрузка не запущена; попробуйте позже.');
+                timer = setTimeout(poll, 2000);
+            });
+        }
+        connect(settings, poll, function () { fail('Не удалось подключиться к qBittorrent. Загрузка не запущена.'); });
+    }
+
+    function selectFiles(data, metadata) {
+        var files = metadata.info.files.map(function (file, index) {
+            return { title: safeText(file.path), subtitle: (Number(file.length) / 1048576).toFixed(1) + ' МБ',
+                checkbox: true, checked: false, index: index };
+        });
+        function show() {
+            Lampa.Select.show({
+                title: 'Выберите серии / файлы',
+                items: [{ title: 'Скачать выбранные', download: true }, { title: 'Отмена' }].concat(files),
+                onSelect: function (item) {
+                    Lampa.Controller.toggle('content');
+                    if (!item.download) return;
+                    if (!files.some(function (file) { return file.checked; })) {
+                        notify('Выберите хотя бы один файл.');
+                        return show();
+                    }
+                    sendTorrent(data, { hash: metadata.hash, priorities: files.map(function (file) { return file.checked ? 1 : 0; }) });
+                },
+                onBack: function () { Lampa.Controller.toggle('content'); }
+            });
+        }
+        show();
     }
 
     function validSettings(settings) {
@@ -374,7 +545,7 @@
                         + '% · ↓ ' + speed(torrent.dlspeed) + ' · ' + remaining(torrent)).appendTo(row);
                     $('<div class="qbit-progress"><div></div></div>').find('div').css('width', progress(torrent) + '%').end().appendTo(row);
                     row.on('hover:focus', function () { last = row[0]; scroll.update(row, true); });
-                    row.on('hover:enter', function () { notify(torrentStatus(torrent) + ' · ' + progress(torrent) + '%'); });
+                    row.on('hover:enter hover:long', function () { torrentActions(settings, torrent, load); });
                     rows.append(row);
                     if (torrent.hash === selectedHash) last = row[0];
                 });
@@ -462,7 +633,7 @@
                 tvPluginsQbit: true,
                 onSelect: function () {
                     Lampa.Controller.toggle(controller);
-                    sendTorrent(event.element);
+                    chooseDownload(event.element);
                 }
             });
         });

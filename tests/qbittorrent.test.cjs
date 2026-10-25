@@ -9,13 +9,14 @@ function setup(storage = {}, replies = ['Ok.']) {
     const timerDelays = new Map();
     const requests = [], notices = [], controllers = [], params = [], dialogs = [], timers = new Map();
     let listener, timerId = 0;
+    const listeners = {};
     const Lampa = {
         Storage: { get: (key, fallback) => ({ qbit_url: 'http://qbit.test:8080', qbit_bypass: true, qbit_confirm: false, ...storage })[key] ?? fallback },
         Activity: { active: () => 'torrents', push() {} },
         Select: { show(dialog) { dialogs.push(dialog); }, hide() {} },
         Noty: { show: message => notices.push(message) },
         SettingsApi: { addComponent() {}, addParam(param) { params.push(param); } },
-        Listener: { follow: (name, callback) => { assert.equal(name, 'torrent'); listener = callback; } },
+        Listener: { follow: (name, callback) => { listeners[name] = callback; if (name === 'torrent') listener = callback; } },
         Controller: { enabled: () => ({ name: 'content' }), toggle: name => controllers.push(name) },
         Reguest: function () {
             this.timeout = () => {};
@@ -39,7 +40,7 @@ function setup(storage = {}, replies = ['Ok.']) {
         listener(event);
         return event;
     }
-    return { requests, notices, controllers, params, dialogs, timers, timerDelays, context, listener, menu,
+    return { requests, notices, controllers, params, dialogs, timers, timerDelays, context, listener, listeners, menu,
         send: data => { menu(data).menu[0].onSelect(); dialogs.at(-1).onSelect({all:true}); },
         tick: () => { const [id, callback] = [...timers.entries()].sort((a,b)=>timerDelays.get(a[0])-timerDelays.get(b[0]))[0]; timers.delete(id); callback(); } };
 }
@@ -461,4 +462,25 @@ test('metadata has a wall-clock deadline even when responses are slow; late repl
     app.requests[0].success(fileMetadata);
     assert.equal(app.dialogs.length,count);
     assert.equal(app.requests.some(r=>r.url.endsWith('/add')),false);
+});
+
+
+test('Watch shortcut toggles immediately and falls back to the original source menu', () => {
+    const storage = {qbit_watch_torrents:false};
+    const app = setup(storage);
+    let handler, menus=0, torrents=0, available=true;
+    const play = {off(){handler=null;return this;},on(name,fn){handler=fn;return this;},trigger(){handler();}};
+    const torrent = {get length(){return available?1:0;},not(){return this;},first(){return this;},trigger(){torrents++;}};
+    const card = {modules:[],html:{find:selector=>selector==='.button--play'?play:torrent},
+        use(module){if(!this.modules.includes(module))this.modules.push(module);},
+        emit(){handler=()=>menus++;this.modules.forEach(module=>module.onGroupButtons.call(this));}};
+    app.listeners.full({type:'build',name:'start',item:card});
+    const setting=app.params.find(p=>p.param.name==='qbit_watch_torrents');
+    assert.equal(setting.param.default,false);
+    card.emit();play.trigger();assert.equal(menus,1);
+    storage.qbit_watch_torrents=true;setting.onChange();play.trigger();assert.equal(torrents,1);
+    available=false;play.trigger();assert.equal(menus,2);
+    available=true;play.trigger();assert.equal(torrents,2);
+    storage.qbit_watch_torrents=false;setting.onChange();play.trigger();assert.equal(menus,3);
+    assert.equal(app.requests.length,0);
 });

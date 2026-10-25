@@ -643,6 +643,32 @@
         Lampa.Menu.addButton('<svg viewBox="0 0 24 24"><path fill="currentColor" d="M11 3h2v10l4-4 1.4 1.4L12 17l-6.4-6.6L7 9l4 4V3zM4 19h16v2H4z"/></svg>', 'qBittorrent', openDownloads);
     }
 
+    var watchCard;
+    var watchFallback = false;
+    var watchButtons = {
+        onGroupButtons: function () {
+            if (watchFallback || !Lampa.Storage.get('qbit_watch_torrents', false)) return;
+            var card = this;
+            var play = card.html.find('.button--play');
+            play.off('hover:enter').on('hover:enter', function () {
+                var torrent = card.html.find('.view--torrent').not('.hide');
+                if (Lampa.Storage.get('qbit_watch_torrents', false) && torrent.length) {
+                    torrent.first().trigger('hover:enter');
+                } else {
+                    // Let Lampa build its own source menu, including other plugins.
+                    watchFallback = true;
+                    try {
+                        card.emit('groupButtons');
+                        play.trigger('hover:enter');
+                    } finally {
+                        watchFallback = false;
+                        card.emit('groupButtons');
+                    }
+                }
+            });
+        }
+    };
+
     function initialize() {
         if (!window.Lampa || !Lampa.Listener || !Lampa.SettingsApi || !Lampa.Reguest) return;
         if (window.tvPluginsQbit) return;
@@ -651,6 +677,12 @@
         if (window.appready) registerDownloads();
         else Lampa.Listener.follow('app', function (event) {
             if (event.type === 'ready') registerDownloads();
+        });
+        Lampa.Listener.follow('full', function (event) {
+            if (event && event.type === 'build' && event.name === 'start' && event.item && typeof event.item.use === 'function') {
+                watchCard = event.item;
+                watchCard.use(watchButtons);
+            }
         });
         Lampa.Listener.follow('torrent', function (event) {
             if (!event || event.type !== 'onlong' || !event.element || !Array.isArray(event.menu)) return;
@@ -678,6 +710,13 @@
                 component: 'qbit_direct',
                 icon: '<svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>',
                 name: 'qBittorrent'
+            });
+
+            Lampa.SettingsApi.addParam({
+                component: 'qbit_direct',
+                param: { name: 'qbit_watch_torrents', type: 'trigger', default: false },
+                field: { name: 'Смотреть → Торренты', description: 'Сразу открывать торренты вместо меню источников. Если торренты недоступны, откроется обычное меню.' },
+                onChange: function () { if (watchCard) watchCard.emit('groupButtons'); }
             });
 
             Lampa.SettingsApi.addParam({

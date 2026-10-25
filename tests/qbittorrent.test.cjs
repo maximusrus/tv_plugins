@@ -10,6 +10,8 @@ function setup(storage = {}, replies = ['Ok.']) {
     let listener, timerId = 0;
     const Lampa = {
         Storage: { get: (key, fallback) => ({ qbit_url: 'http://qbit.test:8080', qbit_bypass: true, qbit_confirm: false, ...storage })[key] ?? fallback },
+        Activity: { active: () => 'torrents', push() {} },
+        Select: { show() {} },
         Noty: { show: message => notices.push(message) },
         SettingsApi: { addComponent() {}, addParam(param) { params.push(param); } },
         Listener: { follow: (name, callback) => { assert.equal(name, 'torrent'); listener = callback; } },
@@ -84,7 +86,7 @@ test('failed login never submits torrent; password whitespace is preserved', () 
     app.send({ MagnetUri: magnet });
     assert.equal(app.requests.length, 1);
     assert.equal(app.requests[0].body, 'username=user&password=%20secret%20');
-    assert.match(app.notices.at(-1), /не удалось войти/);
+    assert.match(app.notices.at(-1), /доступ запрещён/);
 });
 
 test('successful login uses credentialed native transport then multipart add', () => {
@@ -133,21 +135,21 @@ test('suppresses duplicate submissions and ignores late reply after timeout', ()
 });
 
 test('confirms exact infohash, polls without resubmitting torrent', () => {
-    const app = setup({ qbit_confirm: true }, ['Ok.', '[]', JSON.stringify([{ hash: 'a'.repeat(40) }])]);
+    const app = setup({ qbit_confirm: true }, ['[]', 'Ok.', '[]', JSON.stringify([{ hash: 'a'.repeat(40), name: 'Test', state: 'downloading', progress: 0.2 }])]);
     app.send({ MagnetUri: magnet });
     app.tick();
-    assert.equal(app.requests.length, 3);
-    assert.match(app.notices.at(-1), /✔/);
+    assert.equal(app.requests.length, 4);
+    assert.match(app.notices.at(-1), /Добавлено.*Скачивается.*20%/);
     assert.equal(app.requests.filter(request => request.url.endsWith('/add')).length, 1);
 });
 
-test('HTTP links and base32 magnets do not use unrelated UI hash for confirmation', () => {
-    for (const link of ['https://indexer.test/download', 'magnet:?xt=urn:btih:' + 'A'.repeat(32)]) {
-        const app = setup({ qbit_confirm: true });
-        app.send({ Link: link, hash: 'b'.repeat(40) });
-        assert.equal(app.requests.length, 1);
-        assert.match(app.notices.at(-1), /Проверьте список/);
-    }
+test('unrelated UI hashes and torrents never confirm a submission', () => {
+    const unrelated = [{ hash: 'b'.repeat(40), name: 'Other' }];
+    const app = setup({ qbit_confirm: true }, [[], 'Ok.', ...Array(10).fill(unrelated)]);
+    app.send({ Link: 'https://indexer.test/download', hash: 'b'.repeat(40), Title: 'Expected' });
+    for (let i = 0; i < 9; i++) app.tick();
+    assert.match(app.notices.at(-1), /пока не подтверждено/);
+    assert.equal(app.requests.filter(r => r.url.endsWith('/add')).length, 1);
 });
 
 test('loading script twice does not register a second listener', () => {
@@ -162,7 +164,7 @@ test('204 empty login verifies authenticated session before adding', () => {
     app.send({ MagnetUri: magnet });
     assert.equal(app.requests.length, 3);
     assert.ok(app.requests[1].url.endsWith('/app/version'));
-    assert.match(app.notices.at(-1), /Добавлено/);
+    assert.match(app.notices.at(-1), /Запрос принят/);
 });
 
 test('empty login without working session never adds', () => {
@@ -177,7 +179,7 @@ test('native non-200 success callbacks support 204 login and 202 queued add', ()
     const app = setup({ qbit_bypass: false, qbit_user: 'admin' }, [{error:{status:204, responseText:''}}, 'v5.3.0', {error:{status:202, responseText:JSON.stringify({success_count:0,pending_count:1,failure_count:0,added_torrent_ids:[]})}}]);
     app.send({ Link: 'https://indexer.test/download' });
     assert.equal(app.requests.length, 3);
-    assert.match(app.notices.at(-1), /получает торрент/);
+    assert.match(app.notices.at(-1), /Запрос принят/);
 });
 
 test('structured failure is not reported as success', () => {
@@ -229,4 +231,80 @@ test('Android OkHttp keeps multipart boundary last so qBittorrent can parse it',
     assert.ok(request.body.startsWith('--' + delimiter + '\r\n'));
     assert.ok(request.body.endsWith('--' + delimiter + '--\r\n'));
     assert.ok(request.body.includes('Тест & sample'));
+});
+
+
+test('pending HTTP addition waits for exact renamed torrent and ignores unrelated arrivals', () => {
+    const other = {hash:'b'.repeat(40), name:'Other'};
+    const expected = {hash:'c'.repeat(40), name:'Expected', state:'stalledDL', progress:0};
+    const app = setup({qbit_confirm:true}, [[], {pending_count:1}, [other], [other,expected]]);
+    app.send({Link:'http://indexer.test/download',Title:'Expected'});
+    assert.match(app.notices.at(-1), /Ожидаю/);
+    app.tick();
+    assert.match(app.notices.at(-1), /Добавлено.*Ожидает пиров/);
+});
+
+test('duplicate magnet is reported with progress without submitting again', () => {
+    const app = setup({qbit_confirm:true}, [[{hash:'a'.repeat(40),name:'Existing',state:'downloading',progress:0.24}]]);
+    app.send({MagnetUri:magnet});
+    assert.match(app.notices.at(-1), /Уже добавлено.*24%/);
+    assert.equal(app.requests.some(r=>r.url.endsWith('/add')),false);
+});
+
+test('returned ID confirms HTTP addition even when rename is disabled', () => {
+    const hash = 'c'.repeat(40);
+    const app = setup({qbit_confirm:true,qbit_rename:false}, [[], {success_count:1,added_torrent_ids:[hash]}, [{hash,name:'Original',state:'stoppedDL',progress:0}]]);
+    app.send({Link:'http://indexer.test/download'});
+    assert.match(app.notices.at(-1), /Добавлено.*Остановлено/);
+});
+
+test('failed confirmation does not retry the add or claim success', () => {
+    const app = setup({qbit_confirm:true}, [[], {pending_count:1}, {error:{status:500}}]);
+    app.send({Link:'http://indexer.test/download'});
+    assert.match(app.notices.at(-1), /проверить добавление не удалось/);
+    assert.equal(app.requests.filter(r=>r.url.endsWith('/add')).length,1);
+});
+
+
+function viewHelpers() {
+    const context = vm.createContext({window:{},document:{addEventListener(){}},console});
+    vm.runInContext(source.replace('    function initialize() {',
+        '    window.helpers = {torrentStatus, progress, speed, remaining, sortTorrents}; function initialize() {'),context);
+    return context.window.helpers;
+}
+
+test('download view maps stalled, stopped, missing and completed states honestly', () => {
+    const view = viewHelpers();
+    assert.equal(view.torrentStatus({state:'stalledDL'}),'Ожидает пиров');
+    assert.equal(view.torrentStatus({state:'stoppedDL'}),'Остановлено');
+    assert.equal(view.torrentStatus({state:'missingFiles'}),'Файлы не найдены');
+    assert.equal(view.torrentStatus({state:'stalledUP'}),'Скачано');
+    assert.equal(view.torrentStatus({state:'futureState'}),'Неизвестный статус');
+});
+
+test('progress and ETA do not claim completion before 100 percent', () => {
+    const view = viewHelpers();
+    assert.equal(view.progress({progress:0.99999}),99);
+    assert.equal(view.progress({progress:-1}),0);
+    assert.equal(view.progress({progress:2}),100);
+    assert.equal(view.remaining({progress:0.5,eta:8640000}),'Время неизвестно');
+    assert.equal(view.remaining({progress:0.5,eta:3660}),'1 ч 1 мин');
+    assert.equal(view.speed(3145728),'3.0 МБ/с');
+});
+
+test('unfinished downloads precede completed ones without mutating the API response', () => {
+    const view = viewHelpers();
+    const list = [{hash:'done',progress:1,added_on:30},{hash:'old',progress:0.1,added_on:10},{hash:'new',progress:0.2,added_on:20}];
+    assert.equal(view.sortTorrents(list).map(t=>t.hash).join(','),'new,old,done');
+    assert.equal(list[0].hash,'done');
+});
+
+test('confirmation does not open a dialog over a different activity', () => {
+    const app = setup({qbit_confirm:true}, [[], {pending_count:1}, []]);
+    app.context.Lampa.Select.show=()=>assert.fail('dialog opened over another activity');
+    app.send({Link:'http://indexer.test/download',Title:'Expected'});
+    app.context.Lampa.Activity.active=()=> 'other-screen';
+    app.tick();
+    app.requests.at(-1).success([{hash:'c'.repeat(40),name:'Expected',state:'downloading',progress:0}]);
+    assert.match(app.notices.at(-1), /Добавлено/);
 });

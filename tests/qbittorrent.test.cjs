@@ -6,12 +6,12 @@ const source = fs.readFileSync(require('node:path').join(__dirname, '../qbittorr
 const magnet = 'magnet:?xt=urn:btih:' + 'a'.repeat(40);
 
 function setup(storage = {}, replies = ['Ok.']) {
-    const requests = [], notices = [], controllers = [], timers = new Map();
+    const requests = [], notices = [], controllers = [], params = [], timers = new Map();
     let listener, timerId = 0;
     const Lampa = {
         Storage: { get: (key, fallback) => ({ qbit_url: 'http://qbit.test:8080', qbit_bypass: true, qbit_confirm: false, ...storage })[key] ?? fallback },
         Noty: { show: message => notices.push(message) },
-        SettingsApi: { addComponent() {}, addParam() {} },
+        SettingsApi: { addComponent() {}, addParam(param) { params.push(param); } },
         Listener: { follow: (name, callback) => { assert.equal(name, 'torrent'); listener = callback; } },
         Controller: { enabled: () => ({ name: 'content' }), toggle: name => controllers.push(name) },
         Reguest: function () {
@@ -34,7 +34,7 @@ function setup(storage = {}, replies = ['Ok.']) {
         listener(event);
         return event;
     }
-    return { requests, notices, controllers, timers, context, listener, menu,
+    return { requests, notices, controllers, params, timers, context, listener, menu,
         send: data => menu(data).menu[1].onSelect(),
         tick: () => { const [id, callback] = timers.entries().next().value; timers.delete(id); callback(); } };
 }
@@ -87,10 +87,10 @@ test('failed login never submits torrent; password whitespace is preserved', () 
 });
 
 test('successful login uses credentialed native transport then multipart add', () => {
-    const app = setup({ qbit_bypass: false, qbit_user: 'user', qbit_pass: 'secret' }, ['Ok.', 'Ok.']);
+    const app = setup({ qbit_bypass: false, qbit_user: 'user', qbit_pass: 'secret' }, ['Ok.', 'v4.6.7', 'Ok.']);
     app.send({ MagnetUri: magnet, Title: 'Title' });
-    assert.equal(app.requests.length, 2);
-    const request = app.requests[1];
+    assert.equal(app.requests.length, 3);
+    const request = app.requests[2];
     assert.equal(request.options.withCredentials, true);
     assert.match(request.options.headers['Content-Type'], /^multipart\/form-data; boundary=/);
     const boundary = request.options.headers['Content-Type'].split('boundary=')[1];
@@ -153,4 +153,50 @@ test('loading script twice does not register a second listener', () => {
     const app = setup();
     app.context.Lampa.Listener.follow = () => assert.fail('duplicate registration');
     vm.runInContext(source, app.context);
+});
+
+
+test('204 empty login verifies authenticated session before adding', () => {
+    const app = setup({ qbit_bypass: false, qbit_user: 'admin' }, ['', 'v5.3.0', JSON.stringify({success_count: 1, pending_count: 0, failure_count: 0, added_torrent_ids: ['a'.repeat(40)]})]);
+    app.send({ MagnetUri: magnet });
+    assert.equal(app.requests.length, 3);
+    assert.ok(app.requests[1].url.endsWith('/app/version'));
+    assert.match(app.notices.at(-1), /Добавлено/);
+});
+
+test('empty login without working session never adds', () => {
+    const app = setup({ qbit_bypass: false, qbit_user: 'admin' }, ['', {error: {status: 403}}]);
+    app.send({ MagnetUri: magnet });
+    assert.equal(app.requests.length, 2);
+    assert.equal(app.requests.some(r => r.url.endsWith('/add')), false);
+    assert.match(app.notices.at(-1), /доступ запрещён/);
+});
+
+test('native non-200 success callbacks support 204 login and 202 queued add', () => {
+    const app = setup({ qbit_bypass: false, qbit_user: 'admin' }, [{error:{status:204, responseText:''}}, 'v5.3.0', {error:{status:202, responseText:JSON.stringify({success_count:0,pending_count:1,failure_count:0,added_torrent_ids:[]})}}]);
+    app.send({ Link: 'https://indexer.test/download' });
+    assert.equal(app.requests.length, 3);
+    assert.match(app.notices.at(-1), /получает торрент/);
+});
+
+test('structured failure is not reported as success', () => {
+    const app = setup({}, [JSON.stringify({success_count:0,pending_count:0,failure_count:1,added_torrent_ids:[]})]);
+    app.send({ MagnetUri: magnet });
+    assert.match(app.notices.at(-1), /не смог добавить/);
+});
+
+test('string HTTP status is reported accurately', () => {
+    const app = setup({}, [{error: {status:'401'}}]);
+    app.send({ MagnetUri: magnet });
+    assert.match(app.notices.at(-1), /доступ запрещён/);
+});
+
+test('connection test logs in and reads version without submitting torrents', () => {
+    const app = setup({qbit_bypass:false,qbit_user:'admin'}, ['', 'v5.3.0']);
+    const action = app.params.find(p => p.param.name === 'qbit_test');
+    assert.ok(action);
+    action.onChange();
+    assert.equal(app.requests.length, 2);
+    assert.match(app.notices.at(-1), /Подключено.*v5.3.0/);
+    assert.equal(app.requests.some(r => r.url.endsWith('/add')), false);
 });

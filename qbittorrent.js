@@ -55,10 +55,14 @@
             network.native(settings.url + path, function (response) {
                 finish(null, response);
             }, function (error) {
-                finish(error || { status: 0 });
+                var status = Number(error && error.status);
+                // Some Android wrappers route every non-200 response to error.
+                if (status >= 200 && status < 300) finish(null, error.responseText || '');
+                else finish(error || { status: 0 });
             }, body, {
                 dataType: 'text',
                 withCredentials: true,
+                contentType: contentType || 'application/x-www-form-urlencoded',
                 headers: contentType ? { 'Content-Type': contentType } : {},
                 type: body ? 'POST' : 'GET'
             });
@@ -69,10 +73,13 @@
 
     function reportError(error) {
         busy = false;
-        if (error.status === 401 || error.status === 403) {
+        var status = Number(error.status);
+        if (status === 401 || status === 403) {
             notify('qBittorrent: доступ запрещён. Проверьте авторизацию Web UI.');
-        } else if (error.status === 415) {
+        } else if (status === 415) {
             notify('qBittorrent: ссылка не вернула корректный торрент-файл.');
+        } else if (status >= 400) {
+            notify('qBittorrent: ошибка HTTP ' + status + '. Проверьте раздачу и настройки сервера.');
         } else {
             notify('Нет ответа qBittorrent. Проверьте сервер и список загрузок перед повтором.');
         }
@@ -133,35 +140,89 @@
         var link = torrentLink(data);
         if (!link) return notify('У раздачи нет magnet или HTTP(S)-ссылки на торрент.');
         var settings = config();
-        if (!/^https?:\/\/[^\s]+$/i.test(settings.url)) {
-            return notify('Укажите адрес Web UI в Настройки → qBittorrent.');
-        }
-        if (!settings.bypass && !settings.user) {
-            return notify('Укажите логин qBittorrent или настроенный обход авторизации.');
-        }
+        if (!validSettings(settings)) return;
         busy = true;
         notify('Отправляю в qBittorrent…');
         function add() {
             var payload = addBody(settings, link, data.Title || data.title || '');
             request(settings, '/api/v2/torrents/add', payload.body, payload.contentType, function (error, response) {
                 if (error) return reportError(error);
-                if (String(response).trim() !== 'Ok.') {
-                    busy = false;
-                    return notify('qBittorrent не подтвердил приём ссылки. Проверьте сервер и раздачу.');
+                var result = response;
+                if (typeof result === 'string' && result.trim() === 'Ok.') return confirm(settings, link);
+                try { if (typeof result === 'string') result = JSON.parse(result); }
+                catch (parseError) { result = null; }
+                busy = false;
+                if (result && result.failure_count > 0) {
+                    return notify('qBittorrent не смог добавить торрент. Проверьте ссылку и список загрузок.');
                 }
-                confirm(settings, link);
+                if (result && result.success_count > 0) {
+                    return notify('Добавлено в qBittorrent ✔');
+                }
+                if (result && result.pending_count > 0) {
+                    return notify('qBittorrent получает торрент по ссылке. Проверьте список загрузок.');
+                }
+                notify('qBittorrent не подтвердил приём ссылки. Проверьте сервер и раздачу.');
             });
         }
-        if (settings.bypass) return add();
+        connect(settings, add);
+    }
+
+    function validSettings(settings) {
+        if (!/^https?:\/\/[^\s]+$/i.test(settings.url)) {
+            notify('Укажите адрес Web UI в Настройки → qBittorrent.');
+            return false;
+        }
+        if (!settings.bypass && !settings.user) {
+            notify('Укажите логин qBittorrent или настроенный обход авторизации.');
+            return false;
+        }
+        return true;
+    }
+
+    function connect(settings, callback) {
+        function verifySession() {
+            request(settings, '/api/v2/app/version', null, null, function (error, version) {
+                if (error) return reportError(error);
+                if (!/^v?\d+\.\d+/.test(String(version).trim())) {
+                    busy = false;
+                    return notify('Адрес не вернул версию qBittorrent. Проверьте Web UI.');
+                }
+                callback(String(version).trim());
+            });
+        }
+        if (settings.bypass) return callback();
         request(settings, '/api/v2/auth/login', 'username=' + encodeURIComponent(settings.user)
             + '&password=' + encodeURIComponent(settings.pass), 'application/x-www-form-urlencoded', function (error, response) {
             if (error) return reportError(error);
-            if (String(response).trim() !== 'Ok.') {
+            // qBittorrent 5.2+ uses HTTP 204; check the session, not just the body.
+            if (response != null && String(response).trim() !== '' && String(response).trim() !== 'Ok.') {
                 busy = false;
                 return notify('qBittorrent: не удалось войти. Проверьте логин и пароль.');
             }
-            add();
+            verifySession();
         });
+    }
+
+    function testConnection() {
+        if (busy) return notify('Дождитесь ответа qBittorrent.');
+        var settings = config();
+        if (!validSettings(settings)) return;
+        busy = true;
+        notify('Проверяю подключение…');
+        function done(version) {
+            busy = false;
+            notify('Подключено к qBittorrent ' + version);
+        }
+        if (settings.bypass) {
+            request(settings, '/api/v2/app/version', null, null, function (error, version) {
+                if (error) return reportError(error);
+                if (!/^v?\d+\.\d+/.test(String(version).trim())) {
+                    busy = false;
+                    return notify('Адрес не вернул версию qBittorrent. Проверьте Web UI.');
+                }
+                done(String(version).trim());
+            });
+        } else connect(settings, done);
     }
 
     function initialize() {
@@ -195,6 +256,13 @@
                 component: 'qbit_direct',
                 icon: '<svg viewBox="0 0 24 24" width="24" height="24"><path fill="currentColor" d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>',
                 name: 'qBittorrent'
+            });
+
+            Lampa.SettingsApi.addParam({
+                component: 'qbit_direct',
+                param: { name: 'qbit_test', type: 'button' },
+                field: { name: 'Проверить подключение', description: 'Проверить вход без добавления торрента' },
+                onChange: testConnection
             });
 
             Lampa.SettingsApi.addParam({
@@ -233,7 +301,7 @@
                 field: { name: 'Категория', description: 'Категория для торрентов (например: video)' }
             });
 
-            // Новая настройка: автоматическое добавление категории к пути
+            // Keep the previous plugin's storage keys for existing installations.
             Lampa.SettingsApi.addParam({
                 component: 'qbit_direct',
                 param: { name: 'qbit_auto_cat_path', type: 'trigger', default: DEFAULTS.auto_cat_path },

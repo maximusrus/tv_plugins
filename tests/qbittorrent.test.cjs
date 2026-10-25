@@ -41,7 +41,7 @@ function setup(storage = {}, replies = ['Ok.']) {
         return event;
     }
     return { requests, notices, controllers, params, dialogs, timers, timerDelays, context, listener, listeners, menu,
-        send: data => { menu(data).menu[0].onSelect(); dialogs.at(-1).onSelect({all:true}); },
+        send: data => { const count=dialogs.length; menu(data).menu[0].onSelect(); if(dialogs.length>count && dialogs.at(-1).title==='Что скачать?') dialogs.at(-1).onSelect({all:true}); },
         tick: () => { const [id, callback] = [...timers.entries()].sort((a,b)=>timerDelays.get(a[0])-timerDelays.get(b[0]))[0]; timers.delete(id); callback(); } };
 }
 
@@ -538,4 +538,37 @@ test('relative library folders resolve against the plugin base path, not the ser
     app.send({MagnetUri:magnet});
     assert.equal(app.requests.length,0);
     assert.match(app.notices.at(-1),/базовый путь/);
+});
+
+
+test('movies download directly while series and unknown cards keep the chooser', () => {
+    for(const media_type of ['movie','tv',undefined]) {
+        const app=setup();
+        app.context.Lampa.Activity.active=()=>({movie:{media_type}});
+        app.menu({MagnetUri:magnet}).menu[0].onSelect();
+        if(media_type==='movie') {
+            assert.equal(app.dialogs.length,0);
+            assert.equal(app.requests.length,1);
+            assert.ok(app.requests[0].url.endsWith('/add'));
+            assert.doesNotMatch(app.requests[0].body,/filePriorities/);
+        } else {
+            assert.equal(app.requests.length,0);
+            assert.equal(app.dialogs.at(-1).title,'Что скачать?');
+        }
+    }
+});
+
+test('episode display sorts newest first numerically without changing file priority indices', () => {
+    const paths=['Season 1/S01E2.mkv','Season 1/S01E10.mkv','Season 1/S01E1.mkv','Season 2/S02E1.mkv'];
+    const metadata={hash:fileMetadata.hash,info:{files:paths.map(path=>({path,length:100}))}};
+    const app=setup({},[metadata,[],{success_count:1}]);
+    app.context.window.actions.prepareFiles({MagnetUri:magnet});
+    const picker=app.dialogs.at(-1);
+    const displayed=picker.items.filter(item=>item.checkbox);
+    assert.deepEqual(Array.from(displayed,item=>item.index),[3,1,0,2]);
+    displayed[0].checked=true;displayed[2].checked=true;
+    picker.onSelect({download:true});
+    const add=app.requests.find(r=>r.url.endsWith('/add'));
+    assert.match(add.body,/name="filePriorities"\r\n\r\n1,0,0,1/);
+    assert.deepEqual(metadata.info.files.map(file=>file.path),paths);
 });

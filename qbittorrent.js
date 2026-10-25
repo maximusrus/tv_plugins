@@ -353,6 +353,7 @@
 
     function chooseDownload(data) {
         if (busy) return notify('Дождитесь ответа qBittorrent.');
+        if (data.qbitMediaType === 'movie') return sendTorrent(data);
         Lampa.Select.show({
             title: 'Что скачать?',
             items: [
@@ -444,10 +445,15 @@
             return { title: safeText(file.path), subtitle: (Number(file.length) / 1048576).toFixed(1) + ' МБ',
                 checkbox: true, checked: false, index: index };
         });
+        // Sort only the display list: qBittorrent priorities follow metadata indices.
+        var displayFiles = files.slice().sort(function (a, b) {
+            return metadata.info.files[b.index].path.localeCompare(metadata.info.files[a.index].path, undefined, { numeric: true, sensitivity: 'base' })
+                || a.index - b.index;
+        });
         function show() {
             Lampa.Select.show({
                 title: 'Выберите серии / файлы',
-                items: [{ title: 'Скачать выбранные', download: true }, { title: 'Отмена' }].concat(files),
+                items: [{ title: 'Скачать выбранные', download: true }, { title: 'Отмена' }].concat(displayFiles),
                 onSelect: function (item) {
                     Lampa.Controller.toggle('content');
                     if (!item.download) return;

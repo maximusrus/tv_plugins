@@ -52,6 +52,11 @@
         }
         network.timeout(20000);
         try {
+            var headers = { Referer: settings.url + '/' };
+            if (contentType) headers['Content-Type'] = contentType;
+            // Android native requests may not retain the Web UI session cookie.
+            if (!settings.bypass) headers.Authorization = 'Basic '
+                + btoa(unescape(encodeURIComponent(settings.user + ':' + settings.pass)));
             network.native(settings.url + path, function (response) {
                 finish(null, response);
             }, function (error) {
@@ -63,7 +68,7 @@
                 dataType: 'text',
                 withCredentials: true,
                 contentType: contentType || 'application/x-www-form-urlencoded',
-                headers: contentType ? { 'Content-Type': contentType } : {},
+                headers: headers,
                 type: body ? 'POST' : 'GET'
             });
         } catch (error) {

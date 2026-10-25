@@ -26,6 +26,7 @@ function setup(storage = {}, replies = ['Ok.']) {
         }
     };
     const context = vm.createContext({ Lampa, window: { Lampa }, document: { addEventListener() {} },
+        btoa: value => Buffer.from(value, 'binary').toString('base64'), unescape,
         console, setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
         clearTimeout: id => timers.delete(id) });
     vm.runInContext(source, context);
@@ -199,4 +200,18 @@ test('connection test logs in and reads version without submitting torrents', ()
     assert.equal(app.requests.length, 2);
     assert.match(app.notices.at(-1), /Подключено.*v5.3.0/);
     assert.equal(app.requests.some(r => r.url.endsWith('/add')), false);
+});
+
+
+test('native requests carry UTF-8 Basic authorization and matching Referer without cookies', () => {
+    const app = setup({ qbit_bypass: false, qbit_user: 'admin', qbit_pass: 'пароль!' }, ['', 'v5.3.0', { success_count: 1 }]);
+    app.send({ MagnetUri: magnet });
+    assert.equal(app.requests.length, 3);
+    for (const request of app.requests) {
+        assert.equal(request.options.headers.Authorization, 'Basic ' + Buffer.from('admin:пароль!').toString('base64'));
+        assert.equal(request.options.headers.Referer, 'http://qbit.test:8080/');
+    }
+    const bypass = setup();
+    bypass.send({ MagnetUri: magnet });
+    assert.equal(bypass.requests[0].options.headers.Authorization, undefined);
 });

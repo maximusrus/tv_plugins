@@ -10,6 +10,7 @@
     };
     var busy = false;
     var submissionActivity;
+    var nativeSession;
 
     function notify(message) {
         Lampa.Noty.show(message);
@@ -58,15 +59,38 @@
             // Android native requests may not retain the Web UI session cookie.
             if (!settings.bypass) headers.Authorization = 'Basic '
                 + btoa(unescape(encodeURIComponent(settings.user + ':' + settings.pass)));
+            var nativeHeaders = Lampa.Platform && Lampa.Platform.is('android');
+            var session;
+            if (nativeHeaders) {
+                var key = settings.url + '\n' + (headers.Authorization || 'bypass');
+                if (!nativeSession || nativeSession.key !== key) nativeSession = { key: key, cookie: '' };
+                session = nativeSession;
+                if (session.cookie) headers.Cookie = session.cookie;
+            }
             network.native(settings.url + path, function (response) {
+                if (nativeHeaders) {
+                    try {
+                        var envelope = typeof response === 'string' ? JSON.parse(response) : response;
+                        if (!envelope || !envelope.headers || typeof envelope.body !== 'string') throw new Error('Invalid native response');
+                        var cookies = envelope.headers['set-cookie'] || envelope.headers['Set-Cookie'] || [];
+                        if (!Array.isArray(cookies)) cookies = [cookies];
+                        var sessionCookies = cookies.filter(function (cookie) { return typeof cookie === 'string'; })
+                            .map(function (cookie) { return cookie.split(';')[0]; })
+                            .filter(function (cookie) { return /^(?:SID|QBT_SID_\d+)=[^\r\n;]*$/.test(cookie); });
+                        if (sessionCookies.length) session.cookie = sessionCookies.join('; ');
+                        response = envelope.body;
+                    } catch (error) { return finish({ invalid: true }); }
+                }
                 finish(null, response);
             }, function (error) {
                 var status = Number(error && error.status);
+                if (session && (status === 401 || status === 403)) session.cookie = '';
                 // Some Android wrappers route every non-200 response to error.
                 if (status >= 200 && status < 300) finish(null, error.responseText || '');
                 else finish(error || { status: 0 });
             }, body, {
                 dataType: 'text',
+                returnHeaders: !!nativeHeaders,
                 withCredentials: true,
                 contentType: contentType || 'application/x-www-form-urlencoded',
                 headers: headers,
@@ -327,12 +351,13 @@
         var link = torrentLink(data);
         if (!link) return notify('У раздачи нет magnet или HTTP(S)-ссылки на торрент.');
         if (!validSettings(settings)) return;
-        var cancelled = false, timer, attempts = 0;
+        var cancelled = false, timer, deadline, attempts = 0;
         var activity = Lampa.Activity.active();
         busy = true;
         function cancel() {
             cancelled = true;
             clearTimeout(timer);
+            clearTimeout(deadline);
             busy = false;
             Lampa.Controller.toggle('content');
         }
@@ -341,6 +366,7 @@
             if (Lampa.Activity.active() !== activity) {
                 cancelled = true;
                 clearTimeout(timer);
+                clearTimeout(deadline);
                 busy = false;
                 return false;
             }
@@ -376,6 +402,7 @@
                     if (!validHash(metadata.hash) || !Array.isArray(files) || !files.length || files.some(function (file) {
                         return !file || typeof file.path !== 'string' || !isFinite(file.length) || file.length < 0;
                     })) return fail('Некорректный список файлов. Загрузка не запущена.');
+                    clearTimeout(deadline);
                     busy = false;
                     Lampa.Select.hide();
                     return selectFiles(data, metadata);
@@ -384,6 +411,7 @@
                 timer = setTimeout(poll, 2000);
             });
         }
+        deadline = setTimeout(function () { fail('Не удалось получить список файлов за 60 секунд. Загрузка не запущена.'); }, 60000);
         connect(settings, poll, function () { fail('Не удалось подключиться к qBittorrent. Загрузка не запущена.'); });
     }
 

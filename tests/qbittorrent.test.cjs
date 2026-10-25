@@ -6,6 +6,7 @@ const source = fs.readFileSync(require('node:path').join(__dirname, '../qbittorr
 const magnet = 'magnet:?xt=urn:btih:' + 'a'.repeat(40);
 
 function setup(storage = {}, replies = ['Ok.']) {
+    const timerDelays = new Map();
     const requests = [], notices = [], controllers = [], params = [], dialogs = [], timers = new Map();
     let listener, timerId = 0;
     const Lampa = {
@@ -29,7 +30,7 @@ function setup(storage = {}, replies = ['Ok.']) {
     };
     const context = vm.createContext({ Lampa, window: { Lampa, appready: true }, document: { addEventListener() {} },
         btoa: value => Buffer.from(value, 'binary').toString('base64'), unescape,
-        console, setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
+        console, setTimeout: (callback, delay) => { timers.set(++timerId, callback); timerDelays.set(timerId,delay); return timerId; },
         clearTimeout: id => timers.delete(id) });
     vm.runInContext(source.replace('    function initialize() {',
         '    window.actions = {deleteTorrent, prepareFiles, sendTorrent}; function initialize() {'), context);
@@ -38,9 +39,9 @@ function setup(storage = {}, replies = ['Ok.']) {
         listener(event);
         return event;
     }
-    return { requests, notices, controllers, params, dialogs, timers, context, listener, menu,
+    return { requests, notices, controllers, params, dialogs, timers, timerDelays, context, listener, menu,
         send: data => { menu(data).menu[1].onSelect(); dialogs.at(-1).onSelect({all:true}); },
-        tick: () => { const [id, callback] = timers.entries().next().value; timers.delete(id); callback(); } };
+        tick: () => { const [id, callback] = [...timers.entries()].sort((a,b)=>timerDelays.get(a[0])-timerDelays.get(b[0]))[0]; timers.delete(id); callback(); } };
 }
 
 test('adds one long-OK action, preserves existing menu and restores controller', () => {
@@ -414,4 +415,49 @@ test('invalid hashes and failed destructive calls never broaden scope or retry',
     const dialog=app.dialogs.at(-1);dialog.onSelect(dialog.items[1]);
     assert.equal(app.requests.length,1);
     assert.doesNotMatch(app.notices.at(-1),/Торрент удалён/);
+});
+
+
+function nativeReply(body, cookies) {
+    return JSON.stringify({headers:cookies?{'set-cookie':cookies}:{},body:typeof body==='string'?body:JSON.stringify(body)});
+}
+
+test('Android preserves qBittorrent session across metadata polling and selected-file add', () => {
+    const app=setup({qbit_bypass:false,qbit_user:'admin'}, [
+        nativeReply('', ['QBT_SID_8068=session-one; HttpOnly; Path=/']),nativeReply('v5.3.0'),
+        nativeReply({}),nativeReply(fileMetadata),
+        nativeReply(''),nativeReply('v5.3.0'),nativeReply([]),nativeReply({success_count:1})
+    ]);
+    app.context.Lampa.Platform={is:()=>true};
+    app.context.window.actions.prepareFiles({Link:'http://indexer.test/download'});
+    app.tick();
+    const picker=app.dialogs.at(-1);picker.items.find(x=>x.index===1).checked=true;picker.onSelect({download:true});
+    assert.equal(app.requests[0].options.returnHeaders,true);
+    assert.equal(app.requests[0].options.headers.Cookie,undefined);
+    for(const req of app.requests.slice(1)) assert.equal(req.options.headers.Cookie,'QBT_SID_8068=session-one');
+    assert.ok(app.requests.some(r=>r.url.endsWith('/add')));
+});
+
+test('native cookie is isolated by server and accepts legacy SID', () => {
+    const app=setup({qbit_bypass:false,qbit_user:'admin'}, [nativeReply('', ['SID=legacy; Path=/']),nativeReply('v4.6.0'),nativeReply('Ok.'),nativeReply('', ['QBT_SID_8068=next']),nativeReply('v5.3.0'),nativeReply('Ok.')]);
+    app.context.Lampa.Platform={is:()=>true};
+    app.send({MagnetUri:magnet});
+    assert.equal(app.requests[1].options.headers.Cookie,'SID=legacy');
+    const old=app.context.Lampa.Storage.get;
+    app.context.Lampa.Storage.get=(k,d)=>k==='qbit_url'?'http://second.test':old(k,d);
+    app.send({MagnetUri:magnet});
+    assert.equal(app.requests[3].options.headers.Cookie,undefined);
+    assert.equal(app.requests[4].options.headers.Cookie,'QBT_SID_8068=next');
+});
+
+test('metadata has a wall-clock deadline even when responses are slow; late reply cannot reopen picker', () => {
+    const app=setup({},[]);
+    app.context.window.actions.prepareFiles({MagnetUri:magnet});
+    const entry=[...app.timers].find(([id])=>app.timerDelays.get(id)===60000);
+    assert.ok(entry);entry[1]();
+    assert.match(app.notices.at(-1),/60 секунд/);
+    const count=app.dialogs.length;
+    app.requests[0].success(fileMetadata);
+    assert.equal(app.dialogs.length,count);
+    assert.equal(app.requests.some(r=>r.url.endsWith('/add')),false);
 });

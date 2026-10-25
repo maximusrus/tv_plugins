@@ -12,10 +12,11 @@
 ### Установка
 
 1. Отключите старый плагин `kostya4000/lampa-qbit`, чтобы не было двух обработчиков.
-2. После публикации файла добавьте в расширениях Lampa:
-   `https://raw.githubusercontent.com/maximusrus/tv_plugins/main/qbittorrent.js`.
-   Если в репозитории включён GitHub Pages для `main` / корня, можно использовать
+2. Добавьте в расширениях Lampa:
    `https://maximusrus.github.io/tv_plugins/qbittorrent.js`.
+   Используйте именно GitHub Pages: адрес `raw.githubusercontent.com` отдаёт
+   `text/plain` с `nosniff`, поэтому WebView блокирует выполнение скрипта,
+   даже если проверка доступности в Lampa показывает HTTP 200.
 3. Перезапустите Lampa. Откройте **Настройки → qBittorrent** и задайте адрес Web UI,
    логин и пароль. Обход авторизации включайте только если он уже настроен на сервере.
 4. Откройте список раздач, удерживайте **ОК** на нужной раздаче и выберите **В qBittorrent**.

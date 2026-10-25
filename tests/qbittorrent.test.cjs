@@ -523,3 +523,19 @@ test('selected episodes retain the card type captured when the torrent menu open
     assert.match(add.body,/name="savepath"\r\n\r\n\/library\/series/);
     assert.match(add.body,/name="filePriorities"\r\n\r\n0,1/);
 });
+
+
+test('relative library folders resolve against the plugin base path, not the server default', () => {
+    for (const [type,folder] of [['movie','Movies'],['tv','Shows']]) {
+        const app=setup({qbit_savepath:'/external_ssd/',qbit_movie_path:'Movies',qbit_series_path:'Shows',qbit_category:'video'});
+        app.context.Lampa.Activity.active=()=>({movie:{media_type:type}});
+        app.send({MagnetUri:magnet});
+        assert.ok(app.requests[0].body.includes('name="savepath"\r\n\r\n/external_ssd/'+folder+'\r\n'));
+        assert.match(app.requests[0].body,/name="autoTMM"\r\n\r\nfalse/);
+    }
+    const app=setup({qbit_movie_path:'Movies'});
+    app.context.Lampa.Activity.active=()=>({movie:{media_type:'movie'}});
+    app.send({MagnetUri:magnet});
+    assert.equal(app.requests.length,0);
+    assert.match(app.notices.at(-1),/базовый путь/);
+});

@@ -250,7 +250,14 @@
         var separatePath = data.qbitMediaType === 'series' ? settings.series_path
             : data.qbitMediaType === 'movie' ? settings.movie_path : '';
         if (separatePath.trim()) {
-            settings.savepath = separatePath.trim();
+            separatePath = separatePath.trim();
+            var absolutePath = /^(?:[\\/]|[a-z]:[\\/])/i.test(separatePath);
+            var basePath = settings.savepath.trim();
+            if (!absolutePath && !basePath) {
+                return notify('Для относительной папки фильмов или сериалов укажите базовый путь сохранения.');
+            }
+            settings.savepath = absolutePath ? separatePath
+                : basePath.replace(/[\\/]+$/, '') + '/' + separatePath;
             settings.auto_cat_path = false;
         }
         var title = String(data.Title || data.title || '').trim();
@@ -777,13 +784,13 @@
             Lampa.SettingsApi.addParam({
                 component: 'qbit_direct',
                 param: { name: 'qbit_movie_path', type: 'input', values: '', default: DEFAULTS.movie_path },
-                field: { name: 'Папка для фильмов', description: 'Полный путь на сервере qBittorrent. Без добавления категории. Пусто = базовый путь.' }
+                field: { name: 'Папка для фильмов', description: 'Например Movies — внутри базового пути, или полный путь на сервере qBittorrent. Пусто = базовый путь.' }
             });
 
             Lampa.SettingsApi.addParam({
                 component: 'qbit_direct',
                 param: { name: 'qbit_series_path', type: 'input', values: '', default: DEFAULTS.series_path },
-                field: { name: 'Папка для сериалов', description: 'Полный путь на сервере qBittorrent, в том числе для отдельных серий. Пусто = базовый путь.' }
+                field: { name: 'Папка для сериалов', description: 'Например Shows — внутри базового пути, или полный путь на сервере qBittorrent. Применяется и к отдельным сериям.' }
             });
 
             Lampa.SettingsApi.addParam({

@@ -93,7 +93,7 @@ test('successful login uses credentialed native transport then multipart add', (
     assert.equal(app.requests.length, 3);
     const request = app.requests[2];
     assert.equal(request.options.withCredentials, true);
-    assert.match(request.options.headers['Content-Type'], /^multipart\/form-data; boundary=/);
+    assert.match(request.options.headers['Content-Type'], /^multipart\/form-data; charset=utf-8; boundary=/);
     const boundary = request.options.headers['Content-Type'].split('boundary=')[1];
     assert.ok(request.body.endsWith('--' + boundary + '--\r\n'));
     assert.match(request.body, /name="rename"\r\n\r\nTitle/);
@@ -214,4 +214,19 @@ test('native requests carry UTF-8 Basic authorization and matching Referer witho
     const bypass = setup();
     bypass.send({ MagnetUri: magnet });
     assert.equal(bypass.requests[0].options.headers.Authorization, undefined);
+});
+
+
+test('Android OkHttp keeps multipart boundary last so qBittorrent can parse it', () => {
+    const app = setup();
+    app.send({ Link: 'http://indexer.test/download?id=12', Title: 'Тест & sample' });
+    const request = app.requests[0];
+    const contentType = request.options.headers['Content-Type'];
+    // Mirrors RequestBody.create(MediaType, String) in the TV Android client.
+    const wireContentType = /charset=/i.test(contentType) ? contentType : contentType + '; charset=utf-8';
+    const delimiter = wireContentType.split('boundary=')[1];
+    assert.equal(request.options.contentType, contentType);
+    assert.ok(request.body.startsWith('--' + delimiter + '\r\n'));
+    assert.ok(request.body.endsWith('--' + delimiter + '--\r\n'));
+    assert.ok(request.body.includes('Тест & sample'));
 });

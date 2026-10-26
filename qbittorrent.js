@@ -418,7 +418,7 @@
         }
         lookupJellyfin(card, type, function (error, result) {
             jellyText = error ? (error.missing ? 'Jellyfin: не настроен' : 'Jellyfin: не удалось проверить')
-                : result.found ? 'Есть в Jellyfin' : 'Нет в Jellyfin';
+                : result.found ? 'Есть в Jellyfin' : 'Jellyfin: не найдено по TMDB';
             render();
         });
     }

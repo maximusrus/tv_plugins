@@ -11,7 +11,7 @@ function setup(storage = {}, replies = ['Ok.']) {
     let listener, timerId = 0;
     const listeners = {};
     const Lampa = {
-        Storage: { get: (key, fallback) => ({ qbit_url: 'http://qbit.test:8080', qbit_bypass: true, qbit_confirm: false, ...storage })[key] ?? fallback },
+        Storage: { get: (key, fallback) => ({ qbit_url: 'http://qbit.test:8080', qbit_bypass: true, qbit_confirm: false, ...storage })[key] ?? fallback, set: (key,value) => { storage[key]=value; } },
         Activity: { active: () => 'torrents', push() {} },
         Select: { show(dialog) { dialogs.push(dialog); }, hide() {} },
         Noty: { show: message => notices.push(message) },
@@ -34,7 +34,7 @@ function setup(storage = {}, replies = ['Ok.']) {
         console, setTimeout: (callback, delay) => { timers.set(++timerId, callback); timerDelays.set(timerId,delay); return timerId; },
         clearTimeout: id => timers.delete(id) });
     vm.runInContext(source.replace('    function initialize() {',
-        '    window.actions = {deleteTorrent, prepareFiles, sendTorrent}; function initialize() {'), context);
+        '    window.actions = {deleteTorrent, prepareFiles, sendTorrent, lookupJellyfin, showCardStatus}; function initialize() {'), context);
     function menu(data) {
         const event = { type: 'onlong', element: data, menu: [{ title: 'Existing' }] };
         listener(event);
@@ -571,4 +571,89 @@ test('episode display sorts newest first numerically without changing file prior
     const add=app.requests.find(r=>r.url.endsWith('/add'));
     assert.match(add.body,/name="filePriorities"\r\n\r\n1,0,0,1/);
     assert.deepEqual(metadata.info.files.map(file=>file.path),paths);
+});
+
+
+test('latest episode action selects the highest season and episode, ignoring subtitles', () => {
+    const paths=['Show/S01E09.mkv','Show/S02E02.mkv','Show/S02E10.mkv','Show/S03E01.srt'];
+    const metadata={hash:fileMetadata.hash,info:{files:paths.map(path=>({path,length:100}))}};
+    const app=setup({},[metadata,[],{success_count:1}]);
+    app.context.window.actions.prepareFiles({MagnetUri:magnet});
+    const picker=app.dialogs.at(-1);
+    assert.equal(picker.items.find(x=>x.latest).title,'Выбрать последнюю серию · S02E10');
+    assert.equal(picker.items.find(x=>x.index===2).title,'S02E10');
+    assert.match(picker.items.find(x=>x.index===2).subtitle,/Show\/S02E10.mkv/);
+    picker.onSelect(picker.items.find(x=>x.latest));
+    const updated=app.dialogs.at(-1);
+    assert.equal(updated.items.find(x=>x.index===2).checked,true);
+    updated.onSelect({download:true});
+    assert.match(app.requests.find(r=>r.url.endsWith('/add')).body,/name="filePriorities"\r\n\r\n0,0,1,0/);
+});
+
+test('no last episode action when filenames cannot be confidently identified', () => {
+    const metadata={hash:fileMetadata.hash,info:{files:[{path:'Movie.mkv',length:100},{path:'S01E01E02.mkv',length:100}]}};
+    const app=setup({},[metadata]);
+    app.context.window.actions.prepareFiles({MagnetUri:magnet});
+    assert.equal(app.dialogs.at(-1).items.some(x=>x.latest),false);
+});
+
+
+test('Jellyfin matches TMDB IDs across pages, then marks existing episodes', () => {
+    const itemId='a'.repeat(32);
+    const page1={Items:[{Id:'b'.repeat(32),ProviderIds:{Tmdb:'999'}}],TotalRecordCount:2};
+    const page2={Items:[{Id:itemId,ProviderIds:{Tmdb:'42'}}],TotalRecordCount:2};
+    const episodes={Items:[{ParentIndexNumber:2,IndexNumber:3}],TotalRecordCount:1};
+    const app=setup({qbit_jelly_url:'http://jelly.test',qbit_jelly_token:'test-token'},[page1,page2,episodes,fileMetadata,[],{success_count:1}]);
+    let result;
+    app.context.window.actions.lookupJellyfin({id:42,source:'tmdb'},'series',(error,value)=>{assert.equal(error,null);result=value;});
+    assert.equal(result.found,true);assert.equal(result.episodes['2:3'],true);
+    assert.ok(app.requests[1].url.includes('StartIndex=1'));
+    assert.ok(app.requests[2].url.includes('/Shows/'+itemId+'/Episodes'));
+    assert.equal(app.requests[0].options.headers['X-Emby-Token'],'test-token');
+});
+
+test('Jellyfin unavailable and ambiguous matches do not pretend content is absent', () => {
+    const none=setup();let missing;
+    none.context.window.actions.lookupJellyfin({id:42},'movie',(err)=>missing=err);
+    assert.equal(missing.missing,true);
+    const app=setup({qbit_jelly_url:'http://jelly.test',qbit_jelly_token:'test-token'},[{Items:[{ProviderIds:{Tmdb:'42'}},{ProviderIds:{Tmdb:'42'}}],TotalRecordCount:2}]);
+    let failure;app.context.window.actions.lookupJellyfin({id:42},'movie',(err)=>failure=err);
+    assert.equal(failure.invalid,true);
+});
+
+test('episode picker marks files that Jellyfin actually contains', () => {
+    const itemId='a'.repeat(32), card={id:42,source:'tmdb',media_type:'tv'};
+    const app=setup({qbit_jelly_url:'http://jelly.test',qbit_jelly_token:'test-token'},[fileMetadata,{Items:[{Id:itemId,ProviderIds:{Tmdb:'42'}}],TotalRecordCount:1},{Items:[{ParentIndexNumber:1,IndexNumber:2}],TotalRecordCount:1}]);
+    app.context.window.actions.prepareFiles({MagnetUri:magnet,qbitCard:card,qbitMediaType:'series'});
+    const picker=app.dialogs.at(-1);
+    assert.match(picker.items.find(x=>x.index===1).title,/Есть в Jellyfin/);
+    assert.doesNotMatch(picker.items.find(x=>x.index===0).title,/Есть в Jellyfin/);
+});
+
+test('confirmed torrent hash is recorded against exact card identity', () => {
+    const storage={qbit_confirm:true};
+    const app=setup(storage,[[], 'Ok.', [{hash:'a'.repeat(40),name:'Example',state:'downloading',progress:.4}]]);
+    const active={movie:{id:42,source:'tmdb',media_type:'movie'}};
+    app.context.Lampa.Activity.active=()=>active;
+    app.menu({MagnetUri:magnet,Title:'Example'}).menu[0].onSelect();
+    assert.equal(storage.qbit_card_hashes['movie:42'][0],'a'.repeat(40));
+});
+
+
+test('card status reflects a confirmed torrent and a matching Jellyfin movie', () => {
+    const hash='a'.repeat(40), storage={qbit_card_hashes:{'movie:42':[hash]},qbit_jelly_url:'http://jelly.test',qbit_jelly_token:'token'};
+    const app=setup(storage,[[{hash,name:'Movie',state:'downloading',progress:.45}],{Items:[{Id:'b'.repeat(32),ProviderIds:{Tmdb:'42'}}],TotalRecordCount:1}]);
+    let text='';const label={remove(){},text(value){text=value;}};
+    const target={length:1,find(){return label;},append(){}};
+    app.context.window.actions.showCardStatus({data:{movie:{id:42,source:'tmdb',media_type:'movie'}},body:{find(){return target;}}});
+    assert.match(text,/Скачивается · 45%/);
+    assert.match(text,/Есть в Jellyfin/);
+});
+
+test('missing Jellyfin configuration is reported separately from missing content', () => {
+    const app=setup();let text='';const label={remove(){},text(value){text=value;}};
+    const target={length:1,find(){return label;},append(){}};
+    app.context.window.actions.showCardStatus({data:{movie:{id:42,source:'tmdb',media_type:'movie'}},body:{find(){return target;}}});
+    assert.match(text,/Jellyfin: не настроен/);
+    assert.doesNotMatch(text,/Нет в Jellyfin/);
 });

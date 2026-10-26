@@ -10,6 +10,8 @@
     };
     var busy = false;
     var submissionActivity;
+    var submissionCard;
+    var submissionType;
     var nativeSession;
 
     function notify(message) {
@@ -188,6 +190,7 @@
 
     function showConfirmed(torrent, existed) {
         busy = false;
+        rememberTorrent(submissionCard, submissionType, torrent.hash);
         notify((existed ? 'Уже добавлено' : 'Добавлено') + ' · ' + torrentStatus(torrent)
             + ' · ' + progress(torrent) + '%');
         if (Lampa.Activity.active() !== submissionActivity || Lampa.Controller.enabled().name !== 'content') return;
@@ -262,6 +265,8 @@
         }
         var title = String(data.Title || data.title || '').trim();
         submissionActivity = Lampa.Activity.active();
+        submissionCard = data.qbitCard;
+        submissionType = data.qbitMediaType;
         busy = true;
         notify('Отправляю в qBittorrent…');
         function add(before) {
@@ -291,6 +296,130 @@
                 if (error) return reportError(error);
                 add(torrents);
             });
+        });
+    }
+
+    function cardKey(card, type) {
+        if (!card || !/^\d+$/.test(String(card.id || '')) || (card.source && card.source !== 'tmdb')) return '';
+        if (type !== 'movie' && type !== 'series') return '';
+        return type + ':' + card.id;
+    }
+
+    function jellyRequest(path, callback) {
+        var url = String(Lampa.Storage.get('qbit_jelly_url', '') || '').trim().replace(/\/+$/, '');
+        var token = String(Lampa.Storage.get('qbit_jelly_token', '') || '').trim();
+        if (!/^https?:\/\/[^\s]+$/i.test(url) || !token) return callback({ missing: true });
+        var network = new Lampa.Reguest();
+        var finished = false;
+        var timer = setTimeout(function () { finish({ timeout: true }); }, 10000);
+        function finish(error, body) {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            network.clear();
+            if (error) return callback(error);
+            var result;
+            try {
+                if (Lampa.Platform && Lampa.Platform.is('android')) {
+                    var envelope = typeof body === 'string' ? JSON.parse(body) : body;
+                    body = envelope.body;
+                }
+                result = typeof body === 'string' ? JSON.parse(body) : body;
+                if (!result || !Array.isArray(result.Items)) throw new Error('Invalid Jellyfin response');
+            } catch (error) { return callback({ invalid: true }); }
+            callback(null, result);
+        }
+        network.timeout(8000);
+        try {
+            network.native(url + path, function (body) { finish(null, body); }, function (error) { finish(error || {}); }, null, {
+                dataType: 'text', returnHeaders: !!(Lampa.Platform && Lampa.Platform.is('android')),
+                headers: { 'X-Emby-Token': token }, type: 'GET'
+            });
+        } catch (error) { finish({ invalid: true }); }
+    }
+
+    function lookupJellyfin(card, type, callback) {
+        var key = cardKey(card, type);
+        if (!key) return callback({ invalid: true });
+        var matches = [], start = 0;
+        function page() {
+            jellyRequest('/Items?Recursive=true&IncludeItemTypes=' + (type === 'series' ? 'Series' : 'Movie')
+                + '&Fields=ProviderIds&Limit=200&StartIndex=' + start, function (error, result) {
+                if (error) return callback(error);
+                if (!Number.isInteger(result.TotalRecordCount) || result.TotalRecordCount < 0) return callback({ invalid: true });
+                result.Items.forEach(function (item) {
+                    if (item.ProviderIds && String(item.ProviderIds.Tmdb || '') === String(card.id)) matches.push(item);
+                });
+                start += result.Items.length;
+                if (start < result.TotalRecordCount && result.Items.length) return page();
+                if (start < result.TotalRecordCount || matches.length > 1) return callback({ invalid: true });
+                if (!matches.length) return callback(null, { found: false, episodes: {} });
+                if (type !== 'series') return callback(null, { found: true, episodes: {} });
+                var id = matches[0].Id;
+                if (!/^[a-f0-9-]{32,36}$/i.test(id || '')) return callback({ invalid: true });
+                jellyRequest('/Shows/' + id + '/Episodes?IsMissing=false&EnableImages=false', function (episodeError, result) {
+                    if (episodeError) return callback(episodeError);
+                    if (Number.isInteger(result.TotalRecordCount) && result.TotalRecordCount > result.Items.length) return callback({ invalid: true });
+                    var episodes = {};
+                    result.Items.forEach(function (item) {
+                        if (Number.isInteger(item.ParentIndexNumber) && Number.isInteger(item.IndexNumber)) {
+                            episodes[item.ParentIndexNumber + ':' + item.IndexNumber] = true;
+                        }
+                    });
+                    callback(null, { found: true, episodes: episodes });
+                });
+            });
+        }
+        page();
+    }
+
+    function rememberTorrent(card, type, hash) {
+        var key = cardKey(card, type);
+        if (!key || !validHash(hash)) return;
+        var saved = Lampa.Storage.get('qbit_card_hashes', {});
+        if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
+        var hashes = Array.isArray(saved[key]) ? saved[key] : [];
+        if (hashes.indexOf(hash) === -1) hashes.push(hash);
+        saved[key] = hashes;
+        Lampa.Storage.set('qbit_card_hashes', saved);
+    }
+
+    function showCardStatus(event) {
+        var card = event.data && event.data.movie;
+        var type = !card ? '' : card.media_type === 'movie' ? 'movie' : card.media_type === 'tv' ? 'series'
+            : card.first_air_date || card.number_of_seasons || card.original_name ? 'series' : card.release_date ? 'movie' : '';
+        var key = cardKey(card, type);
+        if (!key || !event.body || !event.body.find) return;
+        var target = event.body.find('.full-start-new__buttons');
+        if (!target.length) return;
+        target.find('.qbit-card-status').remove();
+        target.append('<div class="qbit-card-status" style="font-size:0.85em;opacity:0.8;align-self:center;margin:0.5em"></div>');
+        var status = target.find('.qbit-card-status');
+        var qbitText = 'qBittorrent: нет подтверждённых загрузок';
+        var jellyText = 'Jellyfin: проверка…';
+        function render() { status.text(qbitText + ' · ' + jellyText); }
+        render();
+        var saved = Lampa.Storage.get('qbit_card_hashes', {});
+        var hashes = saved && Array.isArray(saved[key]) ? saved[key] : [];
+        if (hashes.length) {
+            var settings = config();
+            if (/^https?:\/\/[^\s]+$/i.test(settings.url) && (settings.bypass || settings.user)) {
+                connect(settings, function () {
+                    readTorrents(settings, function (error, torrents) {
+                        if (error) qbitText = 'qBittorrent: не удалось проверить';
+                        else {
+                            var match = torrents.filter(function (torrent) { return hashes.indexOf(torrent.hash) !== -1; })[0];
+                            qbitText = match ? torrentStatus(match) + ' · ' + progress(match) + '%' : 'qBittorrent: загрузка не найдена';
+                        }
+                        render();
+                    });
+                }, function () { qbitText = 'qBittorrent: не удалось подключиться'; render(); });
+            } else qbitText = 'qBittorrent: проверьте настройки';
+        }
+        lookupJellyfin(card, type, function (error, result) {
+            jellyText = error ? (error.missing ? 'Jellyfin: не настроен' : 'Jellyfin: не удалось проверить')
+                : result.found ? 'Есть в Jellyfin' : 'Нет в Jellyfin';
+            render();
         });
     }
 
@@ -427,10 +556,19 @@
                     if (!validHash(metadata.hash) || !Array.isArray(files) || !files.length || files.some(function (file) {
                         return !file || typeof file.path !== 'string' || !isFinite(file.length) || file.length < 0;
                     })) return fail('Некорректный список файлов. Загрузка не запущена.');
-                    clearTimeout(deadline);
-                    busy = false;
-                    Lampa.Select.hide();
-                    return selectFiles(data, metadata);
+                    function openPicker(jelly) {
+                        if (!current()) return;
+                        clearTimeout(deadline);
+                        busy = false;
+                        Lampa.Select.hide();
+                        selectFiles(data, metadata, jelly);
+                    }
+                    if (data.qbitCard && data.qbitMediaType === 'series') {
+                        return lookupJellyfin(data.qbitCard, 'series', function (error, jelly) {
+                            openPicker(error ? null : jelly);
+                        });
+                    }
+                    return openPicker(null);
                 }
                 if (++attempts >= 30) return fail('Список файлов пока недоступен. Загрузка не запущена; попробуйте позже.');
                 timer = setTimeout(poll, 2000);
@@ -440,22 +578,44 @@
         connect(settings, poll, function () { fail('Не удалось подключиться к qBittorrent. Загрузка не запущена.'); });
     }
 
-    function selectFiles(data, metadata) {
+    function episodeNumber(path) {
+        if (!/\.(?:mkv|mp4|avi|m4v|mov|ts|m2ts|webm)$/i.test(path)) return null;
+        var match = /(?:^|[^a-z0-9])s(\d{1,3})[ ._-]*e(\d{1,3})(?!\d|[ ._-]*e\d|[ ._-]*-\s*\d)/i.exec(path)
+            || /(?:^|[^a-z0-9])(\d{1,3})x(\d{1,3})(?!\d)/i.exec(path);
+        if (!match) return null;
+        return { season: Number(match[1]), episode: Number(match[2]) };
+    }
+
+    function selectFiles(data, metadata, jelly) {
         var files = metadata.info.files.map(function (file, index) {
-            return { title: safeText(file.path), subtitle: (Number(file.length) / 1048576).toFixed(1) + ' МБ',
-                checkbox: true, checked: false, index: index };
+            var episode = episodeNumber(file.path);
+            var title = episode ? 'S' + (episode.season < 10 ? '0' : '') + episode.season
+                + 'E' + (episode.episode < 10 ? '0' : '') + episode.episode : file.path;
+            var present = episode && jelly && jelly.episodes[episode.season + ':' + episode.episode];
+            return { title: safeText(title) + (present ? ' · Есть в Jellyfin' : ''), subtitle: safeText(file.path) + ' · ' + (Number(file.length) / 1048576).toFixed(1) + ' МБ',
+                checkbox: true, checked: false, index: index, episode: episode };
         });
+        var latest = files.filter(function (file) { return file.episode; }).sort(function (a, b) {
+            return b.episode.season - a.episode.season || b.episode.episode - a.episode.episode || a.index - b.index;
+        })[0];
         // Sort only the display list: qBittorrent priorities follow metadata indices.
         var displayFiles = files.slice().sort(function (a, b) {
             return metadata.info.files[b.index].path.localeCompare(metadata.info.files[a.index].path, undefined, { numeric: true, sensitivity: 'base' })
                 || a.index - b.index;
         });
         function show() {
+            var actions = [{ title: 'Скачать выбранные', download: true }];
+            if (latest) actions.push({ title: 'Выбрать последнюю серию · ' + latest.title, latest: true });
+            actions.push({ title: 'Отмена' });
             Lampa.Select.show({
                 title: 'Выберите серии / файлы',
-                items: [{ title: 'Скачать выбранные', download: true }, { title: 'Отмена' }].concat(displayFiles),
+                items: actions.concat(displayFiles),
                 onSelect: function (item) {
                     Lampa.Controller.toggle('content');
+                    if (item.latest) {
+                        latest.checked = true;
+                        return show();
+                    }
                     if (!item.download) return;
                     if (!files.some(function (file) { return file.checked; })) {
                         notify('Выберите хотя бы один файл.');
@@ -709,6 +869,7 @@
             if (event.type === 'ready') registerDownloads();
         });
         Lampa.Listener.follow('full', function (event) {
+            if (event && event.type === 'complite') showCardStatus(event);
             if (event && event.type === 'build' && event.name === 'start' && event.item && typeof event.item.use === 'function') {
                 watchCard = event.item;
                 watchCard.use(watchButtons);
@@ -718,7 +879,8 @@
             if (!event || event.type !== 'onlong' || !event.element || !Array.isArray(event.menu)) return;
             if (event.menu.some(function (item) { return item.tvPluginsQbit; })) return;
             var controller = Lampa.Controller.enabled().name;
-            var data = Object.assign({}, event.element, { qbitMediaType: cardMediaType() });
+            var activity = Lampa.Activity.active();
+            var data = Object.assign({}, event.element, { qbitMediaType: cardMediaType(), qbitCard: activity && activity.movie });
             event.menu.unshift({
                 title: 'В qBittorrent',
                 tvPluginsQbit: true,
@@ -748,6 +910,18 @@
                 param: { name: 'qbit_watch_torrents', type: 'trigger', default: false },
                 field: { name: 'Смотреть → Торренты', description: 'Сразу открывать торренты вместо меню источников. Если торренты недоступны, откроется обычное меню.' },
                 onChange: function () { if (watchCard) watchCard.emit('groupButtons'); }
+            });
+
+            Lampa.SettingsApi.addParam({
+                component: 'qbit_direct',
+                param: { name: 'qbit_jelly_url', type: 'input', values: '', default: '' },
+                field: { name: 'Адрес Jellyfin', description: 'Адрес сервера Jellyfin для проверки библиотеки' }
+            });
+
+            Lampa.SettingsApi.addParam({
+                component: 'qbit_direct',
+                param: { name: 'qbit_jelly_token', type: 'input', values: '', default: '' },
+                field: { name: 'Токен доступа Jellyfin', description: 'Токен хранится в настройках Lampa на этом устройстве.' }
             });
 
             Lampa.SettingsApi.addParam({

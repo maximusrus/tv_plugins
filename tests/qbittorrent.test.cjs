@@ -609,7 +609,7 @@ test('Jellyfin matches TMDB IDs across pages, then marks existing episodes', () 
     assert.equal(result.found,true);assert.equal(result.episodes['2:3'],true);
     assert.ok(app.requests[1].url.includes('StartIndex=1'));
     assert.ok(app.requests[2].url.includes('/Shows/'+itemId+'/Episodes'));
-    assert.equal(app.requests[0].options.headers['X-Emby-Token'],'test-token');
+    assert.equal(app.requests[0].options.headers.Authorization,'MediaBrowser Token="test-token"');
 });
 
 test('Jellyfin unavailable and ambiguous matches do not pretend content is absent', () => {
@@ -656,4 +656,14 @@ test('missing Jellyfin configuration is reported separately from missing content
     app.context.window.actions.showCardStatus({data:{movie:{id:42,source:'tmdb',media_type:'movie'}},body:{find(){return target;}}});
     assert.match(text,/Jellyfin: не настроен/);
     assert.doesNotMatch(text,/Нет в Jellyfin/);
+});
+
+
+test('Jellyfin rejects malformed tokens before issuing a request', () => {
+    for (const token of ['bad"token', 'bad\\token', 'bad\ntoken']) {
+        const app=setup({qbit_jelly_url:'http://jelly.test',qbit_jelly_token:token});
+        let error;app.context.window.actions.lookupJellyfin({id:42},'movie',err=>error=err);
+        assert.equal(error.invalid,true);
+        assert.equal(app.requests.length,0);
+    }
 });

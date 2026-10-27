@@ -309,6 +309,7 @@
         var url = String(Lampa.Storage.get('qbit_jelly_url', '') || '').trim().replace(/\/+$/, '');
         var token = String(Lampa.Storage.get('qbit_jelly_token', '') || '').trim();
         if (!/^https?:\/\/[^\s]+$/i.test(url) || !token) return callback({ missing: true });
+        if (/[\"\\\r\n]/.test(token)) return callback({ invalid: true });
         var network = new Lampa.Reguest();
         var finished = false;
         var timer = setTimeout(function () { finish({ timeout: true }); }, 10000);
@@ -333,7 +334,7 @@
         try {
             network.native(url + path, function (body) { finish(null, body); }, function (error) { finish(error || {}); }, null, {
                 dataType: 'text', returnHeaders: !!(Lampa.Platform && Lampa.Platform.is('android')),
-                headers: { 'X-Emby-Token': token }, type: 'GET'
+                headers: { Authorization: 'MediaBrowser Token="' + token + '"' }, type: 'GET'
             });
         } catch (error) { finish({ invalid: true }); }
     }

@@ -603,7 +603,7 @@ test('Jellyfin matches TMDB IDs across pages, then marks existing episodes', () 
     const page1={Items:[{Id:'b'.repeat(32),ProviderIds:{Tmdb:'999'}}],TotalRecordCount:2};
     const page2={Items:[{Id:itemId,ProviderIds:{Tmdb:'42'}}],TotalRecordCount:2};
     const episodes={Items:[{ParentIndexNumber:2,IndexNumber:3}],TotalRecordCount:1};
-    const app=setup({qbit_jelly_url:'http://jelly.test',qbit_jelly_token:'test-token'},[page1,page2,episodes,fileMetadata,[],{success_count:1}]);
+    const app=setup({qbit_jelly_enabled:true,qbit_jelly_url:'http://jelly.test',qbit_jelly_token:'test-token'},[page1,page2,episodes,fileMetadata,[],{success_count:1}]);
     let result;
     app.context.window.actions.lookupJellyfin({id:42,source:'tmdb'},'series',(error,value)=>{assert.equal(error,null);result=value;});
     assert.equal(result.found,true);assert.equal(result.episodes['2:3'],true);
@@ -613,17 +613,17 @@ test('Jellyfin matches TMDB IDs across pages, then marks existing episodes', () 
 });
 
 test('Jellyfin unavailable and ambiguous matches do not pretend content is absent', () => {
-    const none=setup();let missing;
+    const none=setup({qbit_jelly_enabled:true});let missing;
     none.context.window.actions.lookupJellyfin({id:42},'movie',(err)=>missing=err);
     assert.equal(missing.missing,true);
-    const app=setup({qbit_jelly_url:'http://jelly.test',qbit_jelly_token:'test-token'},[{Items:[{ProviderIds:{Tmdb:'42'}},{ProviderIds:{Tmdb:'42'}}],TotalRecordCount:2}]);
+    const app=setup({qbit_jelly_enabled:true,qbit_jelly_url:'http://jelly.test',qbit_jelly_token:'test-token'},[{Items:[{ProviderIds:{Tmdb:'42'}},{ProviderIds:{Tmdb:'42'}}],TotalRecordCount:2}]);
     let failure;app.context.window.actions.lookupJellyfin({id:42},'movie',(err)=>failure=err);
     assert.equal(failure.invalid,true);
 });
 
 test('episode picker marks files that Jellyfin actually contains', () => {
     const itemId='a'.repeat(32), card={id:42,source:'tmdb',media_type:'tv'};
-    const app=setup({qbit_jelly_url:'http://jelly.test',qbit_jelly_token:'test-token'},[fileMetadata,{Items:[{Id:itemId,ProviderIds:{Tmdb:'42'}}],TotalRecordCount:1},{Items:[{ParentIndexNumber:1,IndexNumber:2}],TotalRecordCount:1}]);
+    const app=setup({qbit_jelly_enabled:true,qbit_jelly_url:'http://jelly.test',qbit_jelly_token:'test-token'},[fileMetadata,{Items:[{Id:itemId,ProviderIds:{Tmdb:'42'}}],TotalRecordCount:1},{Items:[{ParentIndexNumber:1,IndexNumber:2}],TotalRecordCount:1}]);
     app.context.window.actions.prepareFiles({MagnetUri:magnet,qbitCard:card,qbitMediaType:'series'});
     const picker=app.dialogs.at(-1);
     assert.match(picker.items.find(x=>x.index===1).title,/Есть в Jellyfin/);
@@ -641,7 +641,7 @@ test('confirmed torrent hash is recorded against exact card identity', () => {
 
 
 test('card status reflects a confirmed torrent and a matching Jellyfin movie', () => {
-    const hash='a'.repeat(40), storage={qbit_card_hashes:{'movie:42':[hash]},qbit_jelly_url:'http://jelly.test',qbit_jelly_token:'token'};
+    const hash='a'.repeat(40), storage={qbit_card_hashes:{'movie:42':[hash]},qbit_jelly_enabled:true,qbit_jelly_url:'http://jelly.test',qbit_jelly_token:'token'};
     const app=setup(storage,[[{hash,name:'Movie',state:'downloading',progress:.45}],{Items:[{Id:'b'.repeat(32),ProviderIds:{Tmdb:'42'}}],TotalRecordCount:1}]);
     let text='';const label={remove(){},text(value){text=value;}};
     const target={length:1,find(){return label;},append(){}};
@@ -651,7 +651,7 @@ test('card status reflects a confirmed torrent and a matching Jellyfin movie', (
 });
 
 test('missing Jellyfin configuration is reported separately from missing content', () => {
-    const app=setup();let text='';const label={remove(){},text(value){text=value;}};
+    const app=setup({qbit_jelly_enabled:true});let text='';const label={remove(){},text(value){text=value;}};
     const target={length:1,find(){return label;},append(){}};
     app.context.window.actions.showCardStatus({data:{movie:{id:42,source:'tmdb',media_type:'movie'}},body:{find(){return target;}}});
     assert.match(text,/Jellyfin: не настроен/);
@@ -661,9 +661,28 @@ test('missing Jellyfin configuration is reported separately from missing content
 
 test('Jellyfin rejects malformed tokens before issuing a request', () => {
     for (const token of ['bad"token', 'bad\\token', 'bad\ntoken']) {
-        const app=setup({qbit_jelly_url:'http://jelly.test',qbit_jelly_token:token});
+        const app=setup({qbit_jelly_enabled:true,qbit_jelly_url:'http://jelly.test',qbit_jelly_token:token});
         let error;app.context.window.actions.lookupJellyfin({id:42},'movie',err=>error=err);
         assert.equal(error.invalid,true);
         assert.equal(app.requests.length,0);
     }
+});
+
+
+test('Jellyfin is disabled by default even with stored credentials', () => {
+    const storage={qbit_jelly_url:'http://jelly.test',qbit_jelly_token:'test-token'};
+    const app=setup(storage,[fileMetadata]);
+    const card={id:42,source:'tmdb',media_type:'tv'};
+    let text='';const label={remove(){},text(value){text=value;}};
+    const target={length:1,find(){return label;},append(){}};
+    app.context.window.actions.showCardStatus({data:{movie:card},body:{find(){return target;}}});
+    assert.doesNotMatch(text,/Jellyfin/);
+    app.context.window.actions.prepareFiles({MagnetUri:magnet,qbitCard:card,qbitMediaType:'series'});
+    assert.equal(app.dialogs.at(-1).title,'Выберите серии / файлы');
+    assert.equal(app.requests.length,1);
+    assert.ok(app.requests.every(r=>!r.url.startsWith('http://jelly.test')));
+    let error;app.context.window.actions.lookupJellyfin(card,'series',err=>error=err);
+    assert.equal(error.disabled,true);
+    assert.equal(app.requests.length,1);
+    assert.equal(app.params.find(p=>p.param.name==='qbit_jelly_enabled').param.default,false);
 });

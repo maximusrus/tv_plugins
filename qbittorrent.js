@@ -305,7 +305,13 @@
         return type + ':' + card.id;
     }
 
+    function jellyEnabled() {
+        var enabled = Lampa.Storage.get('qbit_jelly_enabled', false);
+        return enabled === true || enabled === 'true';
+    }
+
     function jellyRequest(path, callback) {
+        if (!jellyEnabled()) return callback({ disabled: true });
         var url = String(Lampa.Storage.get('qbit_jelly_url', '') || '').trim().replace(/\/+$/, '');
         var token = String(Lampa.Storage.get('qbit_jelly_token', '') || '').trim();
         if (!/^https?:\/\/[^\s]+$/i.test(url) || !token) return callback({ missing: true });
@@ -397,8 +403,8 @@
         target.append('<div class="qbit-card-status" style="font-size:0.85em;opacity:0.8;align-self:center;margin:0.5em"></div>');
         var status = target.find('.qbit-card-status');
         var qbitText = 'qBittorrent: нет подтверждённых загрузок';
-        var jellyText = 'Jellyfin: проверка…';
-        function render() { status.text(qbitText + ' · ' + jellyText); }
+        var jellyText = jellyEnabled() ? 'Jellyfin: проверка…' : '';
+        function render() { status.text(qbitText + (jellyText ? ' · ' + jellyText : '')); }
         render();
         var saved = Lampa.Storage.get('qbit_card_hashes', {});
         var hashes = saved && Array.isArray(saved[key]) ? saved[key] : [];
@@ -417,7 +423,9 @@
                 }, function () { qbitText = 'qBittorrent: не удалось подключиться'; render(); });
             } else qbitText = 'qBittorrent: проверьте настройки';
         }
+        if (!jellyEnabled()) return;
         lookupJellyfin(card, type, function (error, result) {
+            if (!jellyEnabled()) return;
             jellyText = error ? (error.missing ? 'Jellyfin: не настроен' : 'Jellyfin: не удалось проверить')
                 : result.found ? 'Есть в Jellyfin' : 'Jellyfin: не найдено по TMDB';
             render();
@@ -564,7 +572,7 @@
                         Lampa.Select.hide();
                         selectFiles(data, metadata, jelly);
                     }
-                    if (data.qbitCard && data.qbitMediaType === 'series') {
+                    if (jellyEnabled() && data.qbitCard && data.qbitMediaType === 'series') {
                         return lookupJellyfin(data.qbitCard, 'series', function (error, jelly) {
                             openPicker(error ? null : jelly);
                         });
@@ -911,6 +919,12 @@
                 param: { name: 'qbit_watch_torrents', type: 'trigger', default: false },
                 field: { name: 'Смотреть → Торренты', description: 'Сразу открывать торренты вместо меню источников. Если торренты недоступны, откроется обычное меню.' },
                 onChange: function () { if (watchCard) watchCard.emit('groupButtons'); }
+            });
+
+            Lampa.SettingsApi.addParam({
+                component: 'qbit_direct',
+                param: { name: 'qbit_jelly_enabled', type: 'trigger', default: false },
+                field: { name: 'Проверять библиотеку Jellyfin', description: 'Показывать наличие фильмов и серий в Jellyfin' }
             });
 
             Lampa.SettingsApi.addParam({
